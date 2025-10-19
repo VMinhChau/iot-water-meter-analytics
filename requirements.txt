@@ -1,0 +1,8 @@
+kafka-python==2.0.2
+pyspark==3.5.0
+elasticsearch==8.11.0
+psutil==5.9.6
+pandas==2.1.3
+numpy==1.26.4
+hdfs3==0.3.1
+# elasticsearch-spark-30_2.12==8.11.0
