@@ -10,8 +10,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    mem_limit: 1.5g
     ports:
       - "2181:2181"
+    networks:
+      - spark-net
 
   kafka:
     image: confluentinc/cp-kafka:7.4.0
@@ -27,28 +30,57 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_LISTENERS: PLAINTEXT://:9092,PLAINTEXT_HOST://:29092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"
+    mem_limit: 1.5g
+    networks:
+      - spark-net
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     depends_on:
       - kafka
+    mem_limit: 1.5g
     ports:
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    networks:
+      - spark-net
 
-  # elasticsearch:
-  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+  # kafka-connect:
+  #   image: confluentinc/cp-kafka-connect:7.4.0
+  #   container_name: kafka-connect
+  #   depends_on:
+  #     - kafka
+  #     - namenode
   #   environment:
-  #     - discovery.type=single-node
-  #     - xpack.security.enabled=false
-  #     - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+  #     CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+  #     CONNECT_REST_ADVERTISED_HOST_NAME: 0.0.0.0
+  #     CONNECT_REST_PORT: 8083
+  #     CONNECT_GROUP_ID: "connect-cluster"
+
+  #     CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+  #     CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+  #     CONNECT_STATUS_STORAGE_TOPIC: "connect-statuses"
+
+  #     CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+  #     CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+  #     CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+  #     CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+  #     CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+  #     CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+  #     CONNECT_PLUGIN_PATH: "/usr/share/java,/connectors"
+
   #   ports:
-  #     - "9200:9200"
+  #     - "8083:8083"
   #   volumes:
-  #     - elasticsearch_data:/usr/share/elasticsearch/data
+  #     - ./connectors:/connectors
+  #   networks:
+  #     - spark-net
 
   spark-master:
     image: apache/spark:3.5.0
@@ -61,6 +93,12 @@ services:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_MASTER_PORT=7077
       - SPARK_MASTER_WEBUI_PORT=8080
+      - PYTHONPATH=/opt/spark-apps/lambda_architecture
+    mem_limit: 1.5g
+    volumes:
+      - ./lambda_architecture:/opt/spark-apps/lambda_architecture
+      - ./hadoop/conf/core-site.xml:/opt/hadoop/conf/core-site.xml
+      - ./hadoop/conf/hdfs-site.xml:/opt/hadoop/conf/hdfs-site.xml
     networks:
       - spark-net
 
@@ -76,8 +114,12 @@ services:
       - SPARK_WORKER_MEMORY=2g
       - SPARK_WORKER_PORT=8881
       - SPARK_WORKER_WEBUI_PORT=8082
+      - PYTHONPATH=/opt/spark-apps/lambda_architecture
+    mem_limit: 1.5g
     ports:
       - "8082:8082"
+    volumes:
+      - ./lambda_architecture:/opt/spark-apps/lambda_architecture
     networks:
       - spark-net
 
@@ -93,11 +135,87 @@ services:
       - SPARK_WORKER_MEMORY=2g
       - SPARK_WORKER_PORT=8882
       - SPARK_WORKER_WEBUI_PORT=8083
+      - PYTHONPATH=/opt/spark-apps/lambda_architecture
+    mem_limit: 1.5g
     ports:
-      - "8083:8083"
+      - "8084:8084"
+    volumes:
+      - ./lambda_architecture:/opt/spark-apps/lambda_architecture
+    networks:
+      - spark-net
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=water_meter
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    mem_limit: 1.5g
+    ports:
+      - "9870:9870"
+      - "8020:8020"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks:
+      - spark-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    depends_on:
+      - namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - SERVICE_PRECONDITION=namenode:9870
+    mem_limit: 1.5g
+    ports:
+      - "9864:9864"
+      - "9866:9866"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks:
+      - spark-net
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.monitoring.collection.enabled=false
+      - xpack.ml.enabled=false
+      - xpack.security.enrollment.enabled=false
+    mem_limit: 1g
+    mem_reservation: 512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      - spark-net
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.1
+    container_name: kibana
+    depends_on:
+      - elasticsearch
+    mem_limit: 700m
+    mem_reservation: 300m
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - XPACK_SECURITY_ENABLED=false
     networks:
       - spark-net
 
 volumes:
-  # elasticsearch_data:
-  spark-net:
+  namenode_data:
+  datanode_data:
+  es_data:

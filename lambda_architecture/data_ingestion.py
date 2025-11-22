@@ -20,8 +20,8 @@ def register_hdfs_sink():
             "flush.size": "100",                  
             "rotate.interval.ms": "30000",      
 
-            "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
-            "store.compression.codec": "gzip",
+            "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+            # "store.compression.codec": "gzip",
 
             "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
             "path.format": "YYYY/MM/dd",
@@ -36,8 +36,8 @@ def register_hdfs_sink():
 
             "key.converter": "org.apache.kafka.connect.storage.StringConverter",
             "key.converter.schemas.enable": "false",
-            "value.converter": "org.apache.kafka.connect.storage.StringConverter",
-            "value.converter.schemas.enable": "false"
+            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+            "value.converter.schemas.enable": "true"
         }
     }
 

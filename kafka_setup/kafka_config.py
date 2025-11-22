@@ -3,7 +3,7 @@ from kafka import KafkaConsumer
 import json
 
 class KafkaSetup:
-    def __init__(self, bootstrap_servers='localhost:9092'):
+    def __init__(self, bootstrap_servers='localhost:29092'):
         self.admin_client = KafkaAdminClient(
             bootstrap_servers=bootstrap_servers,
             client_id='water_meter_admin'

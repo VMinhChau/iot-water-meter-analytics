@@ -6,33 +6,35 @@ logger = logging.getLogger(__name__)
 
 class Config:
     # Kafka Configuration
-    KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_SERVERS", "localhost:9092")
-    KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "water-meter-readings")
-    KAFKA_ALERTS_TOPIC = os.getenv("KAFKA_ALERTS_TOPIC", "alerts")
+    KAFKA_BOOTSTRAP_SERVERS = "iot-water-meter-analytics-kafka-1:9092"
+    KAFKA_TOPIC = "water-meter-readings"
+    KAFKA_ALERTS_TOPIC = "alerts"
     
     # HDFS Configuration
-    HDFS_RAW_PATH = os.getenv("HDFS_RAW_PATH", "/data/water_meter/raw")
-    HDFS_BATCH_PATH = os.getenv("HDFS_BATCH_PATH", "/data/water_meter/batch_views")
+    HDFS_NAMENODE = "hdfs://namenode:8020"
+    HDFS_RAW_PATH = os.getenv("HDFS_RAW_PATH", f"{HDFS_NAMENODE}/data/water_meter/raw")
+    HDFS_BATCH_PATH = os.getenv("HDFS_BATCH_PATH", f"{HDFS_NAMENODE}/data/water_meter/batch")
     
     # Elasticsearch Configuration
-    ES_HOSTS = os.getenv("ES_HOSTS", "localhost:9200")
-    ES_SPEED_INDEX = os.getenv("ES_SPEED_INDEX", "water-meter-speed")
-    ES_ALERTS_INDEX = os.getenv("ES_ALERTS_INDEX", "water-meter-alerts")
+    ES_HOSTS = "elasticsearch"
+    ES_PORT = "9200"
+    ES_SPEED_INDEX = "water-meter-speed"
+    ES_ALERTS_INDEX = "water-meter-alerts"
     
     # Processing Configuration
-    WINDOW_DURATION = os.getenv("WINDOW_DURATION", "5 minutes")
-    SLIDE_DURATION = os.getenv("SLIDE_DURATION", "1 minute")
-    WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "30 seconds")
-    TRIGGER_INTERVAL = os.getenv("TRIGGER_INTERVAL", "30 seconds")
+    WINDOW_DURATION = "5 minutes"
+    SLIDE_DURATION = "1 minute"
+    WATERMARK_DELAY = "30 seconds"
+    TRIGGER_INTERVAL = "10 seconds"
     
     # Anomaly Thresholds
-    HIGH_FLOW_THRESHOLD = float(os.getenv("HIGH_FLOW_THRESHOLD", "500"))
-    LOW_BATTERY_THRESHOLD = float(os.getenv("LOW_BATTERY_THRESHOLD", "3.0"))
-    HIGH_TEMP_THRESHOLD = float(os.getenv("HIGH_TEMP_THRESHOLD", "50"))
-    HIGH_CONSUMPTION_THRESHOLD = float(os.getenv("HIGH_CONSUMPTION_THRESHOLD", "10000"))
+    HIGH_FLOW_THRESHOLD = float("500")
+    LOW_BATTERY_THRESHOLD = float("3.0")
+    HIGH_TEMP_THRESHOLD = float("50")
+    HIGH_CONSUMPTION_THRESHOLD = float("10000")
     
     # Checkpoint Configuration
-    CHECKPOINT_LOCATION = os.getenv("CHECKPOINT_LOCATION", "/tmp/spark_checkpoints")
+    CHECKPOINT_LOCATION = "/tmp/spark_checkpoints"
     
     # Performance Configuration
     SPARK_EXECUTOR_MEMORY = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")

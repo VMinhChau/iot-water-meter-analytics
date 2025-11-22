@@ -19,4 +19,8 @@ echo ""
 echo "Press Ctrl+C to stop data generation..."
 
 # Start data generator
-python3 data_generator/water_meter_simulator.py
+python data_generator/water_meter_simulator.py
+
+curl -s http://localhost:8083/connectors/water-meter-hdfs-sink/status
+
+curl -X POST http://localhost:8083/connectors/water-meter-hdfs-sink/tasks/0/restart

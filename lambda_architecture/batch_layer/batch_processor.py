@@ -12,7 +12,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from config import Config
-from data_enrichment import DataEnrichment
+from data_enrichment import SparkDataEnrichment
 from data_cleaning import DataCleaner
 from schema_registry import SchemaRegistry
 
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 class BatchProcessor:
     def __init__(self, config=None):
         self.config = config or Config()
-        self.enricher = DataEnrichment()
         self.spark = SparkSession.builder \
             .appName("WaterMeterBatchLayer") \
             .config("spark.sql.adaptive.enabled", "true") \
@@ -34,9 +33,9 @@ class BatchProcessor:
         
         self.spark.sparkContext.setLogLevel("WARN")
         self.cleaner = DataCleaner(self.spark)
+        self.enricher = SparkDataEnrichment(self.spark)
         
-        # Broadcast meter metadata for efficient joins
-        self.meter_metadata_bc = self.spark.sparkContext.broadcast(self.enricher.meter_details)
+        # Metadata is now handled directly in Spark DataFrames
         logger.info("BatchProcessor initialized successfully")
     
     def process_historical_data(self, input_path=None, output_path=None):
@@ -68,21 +67,8 @@ class BatchProcessor:
                 logger.error(f"Failed to read data from {input_path}: {e}")
                 raise
             
-            # Create metadata DataFrame for joining
-            metadata_rows = []
-            for meter_id, metadata in self.meter_metadata_bc.value.items():
-                metadata_rows.append({
-                    'meter_id': meter_id,
-                    'meter_type': metadata.get('Meter Type', 'unknown'),
-                    'suburb': metadata.get('Suburb', 'unknown'),
-                    'postcode': metadata.get('Postcode', 0),
-                    'usage_type': metadata.get('Usage Type', 'unknown')
-                })
-            
-            metadata_df = self.spark.createDataFrame(metadata_rows)
-            
             # Enrich raw data with metadata via join
-            enriched_df = raw_df.join(metadata_df, "meter_id", "left")
+            enriched_df = self.enricher.enrich_dataframe(raw_df)
             
             # Enhanced data quality filtering with validation and optimization
             filtered_df = enriched_df.filter(

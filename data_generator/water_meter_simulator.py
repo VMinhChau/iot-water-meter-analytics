@@ -24,17 +24,17 @@ class WaterMeterSimulator:
         
         self.data_path = data_path
     
-    def clean_json(self, obj):
-        if isinstance(obj, dict):
-            return {k: self.clean_json(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self.clean_json(v) for v in obj]
-        elif isinstance(obj, float):
-            if math.isnan(obj) or math.isinf(obj):
-                return None
-            return obj
-        else:
-            return obj
+    # def clean_json(self, obj):
+    #     if isinstance(obj, dict):
+    #         return {k: self.clean_json(v) for k, v in obj.items()}
+    #     elif isinstance(obj, list):
+    #         return [self.clean_json(v) for v in obj]
+    #     elif isinstance(obj, float):
+    #         if math.isnan(obj) or math.isinf(obj):
+    #             return None
+    #         return obj
+    #     else:
+    #         return obj
 
     def process_csv_file(self, file_path):
         """Memory-efficient row-by-row CSV reading"""
@@ -65,9 +65,9 @@ class WaterMeterSimulator:
             print(f"Processing {csv_file}...")
             
             for reading, ts_ms in self.process_csv_file(file_path):
-                data = self.clean_json(reading)
+                # data = self.clean_json(reading)
                 if self.use_kafka and self.producer:
-                    self.producer.send('water-meter-readings', value=data, timestamp_ms=ts_ms)
+                    self.producer.send('water-meter-readings', value=reading, timestamp_ms=ts_ms)
                 else:
                     print(json.dumps(reading))
                 
@@ -79,7 +79,8 @@ class WaterMeterSimulator:
             
             if max_records and total_records >= max_records:
                 break
-        
+            time.sleep(30)
+            
         if self.producer:
             self.producer.flush()  # flush remaining messages
             self.producer.close()
