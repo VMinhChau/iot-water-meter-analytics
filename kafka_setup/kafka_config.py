@@ -11,9 +11,7 @@ class KafkaSetup:
     
     def create_topics(self):
         topics = [
-            NewTopic(name='water-meter-readings', num_partitions=3, replication_factor=1),
-            NewTopic(name='processed-readings', num_partitions=3, replication_factor=1),
-            NewTopic(name='alerts', num_partitions=1, replication_factor=1)
+            NewTopic(name='water-meter-readings', num_partitions=1, replication_factor=1),
         ]
         
         try:

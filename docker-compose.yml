@@ -99,6 +99,7 @@ services:
       - ./lambda_architecture:/opt/spark-apps/lambda_architecture
       - ./hadoop/conf/core-site.xml:/opt/hadoop/conf/core-site.xml
       - ./hadoop/conf/hdfs-site.xml:/opt/hadoop/conf/hdfs-site.xml
+      - ./data/managedobject_details.csv:/tmp/managedobject_details.csv
     networks:
       - spark-net
 
@@ -120,6 +121,7 @@ services:
       - "8082:8082"
     volumes:
       - ./lambda_architecture:/opt/spark-apps/lambda_architecture
+      - ./data/managedobject_details.csv:/tmp/managedobject_details.csv
     networks:
       - spark-net
 
@@ -141,6 +143,7 @@ services:
       - "8084:8084"
     volumes:
       - ./lambda_architecture:/opt/spark-apps/lambda_architecture
+      - ./data/managedobject_details.csv:/tmp/managedobject_details.csv
     networks:
       - spark-net
 

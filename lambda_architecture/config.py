@@ -23,15 +23,16 @@ class Config:
     
     # Processing Configuration
     WINDOW_DURATION = "5 minutes"
-    SLIDE_DURATION = "1 minute"
+    SLIDE_DURATION = "2 minute"
     WATERMARK_DELAY = "30 seconds"
-    TRIGGER_INTERVAL = "10 seconds"
+    TRIGGER_INTERVAL = "60 seconds"
     
     # Anomaly Thresholds
     HIGH_FLOW_THRESHOLD = float("500")
     LOW_BATTERY_THRESHOLD = float("3.0")
     HIGH_TEMP_THRESHOLD = float("50")
     HIGH_CONSUMPTION_THRESHOLD = float("10000")
+    PULSE1_TOTAL_MAX_DELTA = 2000
     
     # Checkpoint Configuration
     CHECKPOINT_LOCATION = "/tmp/spark_checkpoints"
