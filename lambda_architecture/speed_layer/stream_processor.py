@@ -13,6 +13,10 @@ from pyspark.sql.window import Window
 from pyspark import StorageLevel
 from config import Config
 
+from pyspark.sql.functions import struct, col, lit, date_format, current_timestamp
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SpeedLayer")
 
@@ -128,19 +132,9 @@ class SpeedLayer:
     # ================================================================
     # MAIN STREAMING PROCESS
     # ================================================================
-    def process_realtime_stream(self):
-        raw_stream = self.create_kafka_stream()
-        schema = self.get_schema()
-
-        parsed = raw_stream.select(
-            from_json(col("value").cast("string"), schema).alias("data"),
-            col("timestamp").alias("kafka_timestamp")
-        ).select("data.*", "kafka_timestamp")
-
-        cleaned = self.clean_iot_data(parsed)
-        water_df, device_df = self.split_measurements(cleaned)
-
-        # --- Join metadata ---
+    # Modular helper: compute water statistics
+    # ================================================================
+    def build_water_stats(self, water_df):
         meta_cols = ["meter_id", "suburb", "meter_type", "usage_type", "postcode", "suburb_label"]
         metadata_sel = self.metadata.select(*meta_cols).select(
             col("meter_id"),
@@ -150,9 +144,9 @@ class SpeedLayer:
             col("postcode").alias("meta_postcode"),
             col("suburb_label").alias("meta_suburb_label")
         )
+
         water_df = water_df.join(metadata_sel, on="meter_id", how="left")
 
-        # --- Water stats aggregation ---
         water_stats_df = (
             water_df
             .filter(col("measurement_type_clean").isin("pulse1", "pulse1_total"))
@@ -173,14 +167,10 @@ class SpeedLayer:
                 avg("value").alias("avg_value"),
                 max("value").alias("max_value"),
                 min("value").alias("min_value"),
-
-                # NEW: real timestamp range inside the window
                 min("timestamp_parsed").alias("timestamp_min"),
                 max("timestamp_parsed").alias("timestamp_max"),
-
                 current_timestamp().alias("processed_time")
             )
-            # doc_id → use REAL timestamp, not window_start
             .withColumn(
                 "doc_id",
                 concat(
@@ -191,6 +181,142 @@ class SpeedLayer:
             )
             .drop("window")
         )
+        return stats
+
+    # ================================================================
+    # Modular helper: build anomalies
+    # ================================================================
+    def build_anomalies(self, water_df, device_df):
+        HIGH_FLOW = self.config.HIGH_FLOW_THRESHOLD
+        ZERO_THRESHOLD = 0
+        IMPOSSIBLE_MAX = 1e6
+
+        pulse1_anomalies = (
+            water_df.filter(col("measurement_type_clean") == "pulse1")
+            .withColumn("alert_type", when(col("value") > HIGH_FLOW, "HIGH_FLOW"))
+            .withColumn("severity", when(col("alert_type") == "HIGH_FLOW", "WARNING"))
+            .withColumn("alert_timestamp", current_timestamp())
+            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
+                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
+                                        lit("_"), expr("uuid()")))
+            .filter(col("alert_type").isNotNull())
+        )
+
+        neg_impossible = (
+            water_df.filter(col("measurement_type_clean").isin("10266/0", "10266/1", "10267/0"))
+            .withColumn(
+                "alert_type",
+                when(col("value") < 0, "NEGATIVE_VALUE")
+                .when(col("value") > IMPOSSIBLE_MAX, "IMPOSSIBLE_VALUE")
+            )
+            .withColumn("severity", lit("CRITICAL"))
+            .withColumn("alert_timestamp", current_timestamp())
+            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
+                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
+                                        lit("_"), expr("uuid()")))
+            .filter(col("alert_type").isNotNull())
+        )
+
+        zero_reading = (
+            water_df.filter(col("value") == ZERO_THRESHOLD)
+            .withColumn("alert_type", lit("ZERO_READING"))
+            .withColumn("severity", lit("WARNING"))
+            .withColumn("alert_timestamp", current_timestamp())
+            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
+                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
+                                        lit("_"), expr("uuid()")))
+        )
+
+        device_anomalies = (
+            device_df.filter(
+                ((col("measurement_type_clean") == "battery") & (col("value") < self.config.LOW_BATTERY_THRESHOLD)) |
+                ((col("measurement_type_clean") == "devicetemperature") & (col("value") > self.config.HIGH_TEMP_THRESHOLD))
+            )
+            .withColumn("alert_type", when(col("measurement_type_clean") == "battery", "LOW_BATTERY").otherwise("HIGH_TEMPERATURE"))
+            .withColumn("severity", when(col("alert_type") == "LOW_BATTERY", "CRITICAL").otherwise("WARNING"))
+            .withColumn("alert_timestamp", current_timestamp())
+            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
+                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
+                                        lit("_"), expr("uuid()")))
+        )
+
+        anomaly_cols = ["meter_id", "timestamp_parsed", "measurement_type_clean", "value", "alert_type",
+                        "severity", "alert_timestamp", "doc_id"]
+
+        def align(df):
+            for c in anomaly_cols:
+                if c not in df.columns:
+                    df = df.withColumn(c, lit(None))
+            return df.select(*anomaly_cols)
+
+        anomalies = align(pulse1_anomalies).unionByName(align(neg_impossible)).unionByName(align(zero_reading)) \
+                                           .unionByName(align(device_anomalies))
+        return anomalies
+
+    # ================================================================
+    # Modular helper: leak detection
+    # ================================================================
+    def build_leak_detection(self, water_stats_df):
+        # Flag as leak if average flow exceeds threshold and reading count is above minimum
+        leak_df = (
+            water_stats_df
+            # Add a leak_flag column: 1 if both avg_value > threshold and reading_count > 5, else 0
+            .withColumn(
+                "leak_flag",
+                when(
+                    (col("avg_value") > self.config.HIGH_FLOW_THRESHOLD) &
+                    (col("reading_count") > 5),
+                    lit(1)
+                ).otherwise(0)
+            )
+            # Set alert type for records flagged as leak
+            .withColumn("alert_type", when(col("leak_flag") == 1, "LEAK_SUSPECT"))
+            # Set severity level for leak alerts
+            .withColumn("severity", when(col("leak_flag") == 1, "CRITICAL"))
+            # Add current timestamp as alert creation time
+            .withColumn("alert_timestamp", current_timestamp())
+            # Generate a unique document ID for ES for each leak alert
+            .withColumn(
+                "doc_id",
+                concat(
+                    col("meter_id"), lit("_LEAK_"),
+                    date_format(col("timestamp_max"), "yyyyMMddHHmmss"),
+                    lit("_"), expr("uuid()")
+                )
+            )
+            # Only keep rows that are flagged as leaks
+            .filter(col("leak_flag") == 1)
+        )
+        return leak_df
+
+    # ================================================================
+        
+    def process_realtime_stream(self):
+        raw_stream = self.create_kafka_stream()
+        schema = self.get_schema()
+
+        parsed = raw_stream.select(
+            from_json(col("value").cast("string"), schema).alias("data"),
+            col("timestamp").alias("kafka_timestamp")
+        ).select("data.*", "kafka_timestamp")
+
+        cleaned = self.clean_iot_data(parsed)
+        water_df, device_df = self.split_measurements(cleaned)
+
+        # --- Modular: compute stats ---
+        stats = self.build_water_stats(water_df)
+
+        # --- Modular: compute anomalies ---
+        anomalies = self.build_anomalies(water_df, device_df)
+
+        # --- Modular: leak detection ---
+        leak_df = self.build_leak_detection(stats)
+
+        # --- Modular: trend detection ---
+        # trend_df = self.build_trend(stats)
+
+        # Merge leak detection into anomalies
+        anomalies = anomalies.unionByName(leak_df, allowMissingColumns=True)
 
         # --- Active distribution ---
         active_distribution = self.metadata.groupBy(
@@ -219,78 +345,6 @@ class SpeedLayer:
         # Drop original active_distribution columns to avoid duplicate fields
         stats_df = stats_df.drop("suburb", "meter_type", "usage_type")
 
-        # --- Water anomalies ---
-        HIGH_FLOW = self.config.HIGH_FLOW_THRESHOLD
-        ZERO_THRESHOLD = 0  # giá trị zero reading
-        IMPOSSIBLE_MAX = 1e6
-
-        pulse1_anomalies = (
-            water_df.filter(col("measurement_type_clean") == "pulse1")
-            .withColumn("alert_type", when(col("value") > HIGH_FLOW, "HIGH_FLOW"))
-            .withColumn("severity", when(col("alert_type") == "HIGH_FLOW", "WARNING"))
-            .withColumn("alert_timestamp", current_timestamp())
-            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
-                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
-                                        lit("_"), expr("uuid()")))
-            .filter(col("alert_type").isNotNull())
-        )
-
-        # --- Negative or impossible readings
-        neg_impossible = (
-            water_df.filter(col("measurement_type_clean").isin("10266/0", "10266/1", "10267/0"))
-            .withColumn(
-                "alert_type",
-                when(col("value") < 0, "NEGATIVE_VALUE")
-                .when(col("value") > IMPOSSIBLE_MAX, "IMPOSSIBLE_VALUE")
-            )
-            .withColumn("severity", lit("CRITICAL"))
-            .withColumn("alert_timestamp", current_timestamp())
-            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
-                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
-                                        lit("_"), expr("uuid()")))
-            .filter(col("alert_type").isNotNull())
-        )
-
-        # --- Drop-to-zero anomaly (Zero-reading)
-        zero_reading = (
-            water_df.filter(col("value") == ZERO_THRESHOLD)
-            .withColumn("alert_type", lit("ZERO_READING"))
-            .withColumn("severity", lit("WARNING"))
-            .withColumn("alert_timestamp", current_timestamp())
-            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
-                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
-                                        lit("_"), expr("uuid()")))
-        )
-
-        # --- Device anomalies (unchanged)
-        device_anomalies = (
-            device_df.filter(
-                ((col("measurement_type_clean") == "battery") & (col("value") < self.config.LOW_BATTERY_THRESHOLD)) |
-                ((col("measurement_type_clean") == "devicetemperature") & (col("value") > self.config.HIGH_TEMP_THRESHOLD))
-            )
-            .withColumn("alert_type", when(col("measurement_type_clean") == "battery", "LOW_BATTERY").otherwise("HIGH_TEMPERATURE"))
-            .withColumn("severity", when(col("alert_type") == "LOW_BATTERY", "CRITICAL").otherwise("WARNING"))
-            .withColumn("alert_timestamp", current_timestamp())
-            .withColumn("doc_id", concat(col("meter_id"), lit("_"),
-                                        date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"),
-                                        lit("_"), expr("uuid()")))
-        )
-
-        # --- Align schema and union all anomalies ---
-        anomaly_cols = ["meter_id", "timestamp_parsed", "measurement_type_clean", "value", "alert_type",
-                        "severity", "alert_timestamp", "doc_id", "meta_meter_type", "meta_suburb", "meta_postcode",
-                        "meta_usage_type", "meta_suburb_label"]
-
-        def align(df):
-            for c in anomaly_cols:
-                if c not in df.columns:
-                    df = df.withColumn(c, lit(None))
-            return df.select(*anomaly_cols)
-
-        water_anomalies = align(pulse1_anomalies).unionByName(align(neg_impossible)).unionByName(align(zero_reading))
-        anomalies = water_anomalies.unionByName(align(device_anomalies))
-
-
         # --- Pulse1_total stream ---
         pulse1_total_df = water_df.filter(col("measurement_type_clean") == "pulse1_total")
 
@@ -305,11 +359,11 @@ class SpeedLayer:
             return
         enriched = df.withColumn("batch_id", lit(str(epoch_id))).withColumn("ingestion_time", current_timestamp())
         writer = (enriched.write
-                  .format("org.elasticsearch.spark.sql")
-                  .option("es.nodes", self.config.ES_HOSTS)
-                  .option("es.port", str(self.config.ES_PORT))
-                  .option("es.nodes.wan.only", "true")
-                  .mode("append"))
+                .format("org.elasticsearch.spark.sql")
+                .option("es.nodes", self.config.ES_HOSTS)
+                .option("es.port", str(self.config.ES_PORT))
+                .option("es.nodes.wan.only", "true")
+                .mode("append"))
         if upsert_id_col:
             writer = writer.option("es.mapping.id", upsert_id_col)
         writer.save(index_name)
@@ -323,15 +377,15 @@ class SpeedLayer:
         stats_query = stats_df.writeStream.foreachBatch(
             lambda df, epoch: self._write_batch_to_es(df, epoch, self.config.ES_SPEED_INDEX, upsert_id_col="doc_id")
         ).outputMode("append") \
-         .option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/stats") \
-         .queryName("speed_stats") \
-         .trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
+        .option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/stats") \
+        .queryName("speed_stats") \
+        .trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
         anomalies_query = anomalies_df.writeStream.foreachBatch(
             lambda df, epoch: self._write_batch_to_es(df, epoch, self.config.ES_ALERTS_INDEX)
         ).outputMode("append") \
-         .option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/anomalies") \
-         .queryName("speed_anomalies") \
-         .trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
+        .option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/anomalies") \
+        .queryName("speed_anomalies") \
+        .trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
         logger.info("Speed layer running.")
         return [stats_query, anomalies_query]
 
