@@ -1,0 +1,28 @@
+Connecting Tableau Desktop to Spark ThriftServer on Mac
+
+1. Install Tableau Desktop
+   Download and install Tableau Desktop from the official Tableau website. You can use the free trial if needed.
+
+2. Add JDBC Drivers for Tableau
+   Tableau requires JDBC drivers to connect to Spark ThriftServer.
+   - Download the Hive JDBC driver:
+     https://repo1.maven.org/maven2/org/apache/hive/hive-jdbc/3.1.2/hive-jdbc-3.1.2-standalone.jar
+   - Copy the .jar file to Tableau’s driver folder on Mac:
+     mkdir -p ~/Library/Tableau/Drivers
+     cp hive-jdbc-3.1.2-standalone.jar ~/Library/Tableau/Drivers/
+
+3. Start Spark ThriftServer
+   Make sure the Spark ThriftServer is running inside your Spark Master container.
+   Example command:
+     docker exec -it spark-master /opt/spark/sbin/start-thriftserver.sh
+
+4. Connect Tableau to Spark via JDBC
+   - Open Tableau Desktop.
+   - Choose “Other Databases (JDBC)” as the connector.
+   - Enter the connection URL:
+     jdbc:hive2://localhost:10000/default;transportMode=binary
+   - Provide authentication if needed (user/password).
+   - Test the connection and load the tables.
+
+5. Optional: Use Extracts for Large Tables
+   If your Delta tables are large, consider creating a Tableau Extract to improve performance during exploration.

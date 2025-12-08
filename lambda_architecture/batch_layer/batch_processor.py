@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
+from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from pyspark import StorageLevel
 import logging
@@ -43,14 +43,8 @@ class BatchProcessor:
         try:
             logger.info(f"Processing raw historical data from {input_path}")
 
-            # Read Delta or fallback to JSON
-            try:
-                raw_df = self.spark.read.format("delta").load(input_path)
-                logger.info("Loaded Delta data successfully")
-            except Exception as e:
-                logger.warning(f"Delta not found or failed to read, fallback to JSON: {e}")
-                raw_df = self.spark.read.option("multiline", "true").json(input_path)
-                logger.info("Loaded JSON data successfully")
+            raw_df = self.spark.read.format("delta").load(input_path)
+            logger.info("Loaded Delta data successfully")
 
             record_count = raw_df.count()
             if record_count == 0:
@@ -62,49 +56,57 @@ class BatchProcessor:
             # Enrich raw data
             enriched_df = self.enricher.enrich_dataframe(raw_df)
 
+            # Rename columns to be SQL/Tableau friendly
+            if 'Meter Type' in enriched_df.columns:
+                enriched_df = enriched_df.withColumnRenamed('Meter Type', 'meter_type')
+            if 'Usage Type' in enriched_df.columns:
+                enriched_df = enriched_df.withColumnRenamed('Usage Type', 'usage_type')
+            if 'Suburb' in enriched_df.columns:
+                enriched_df = enriched_df.withColumnRenamed('Suburb', 'suburb')
+
             # Filter & validation
             filtered_df = enriched_df.filter(
-                (col("value").isNotNull()) &
-                (col("measurement_type").isNotNull()) &
-                (col("meter_id").isNotNull()) &
-                (col("timestamp").isNotNull()) &
-                (col("value") >= 0) &
-                (col("value") <= 100000) &
-                (col("meter_id") > 0) &
-                (col("measurement_type").isin(["Pulse1", "Pulse1_Total", "Battery", "DeviceTemperature"]))
-            ).repartition(200, col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK_SER)
+                (F.col("value").isNotNull()) &
+                (F.col("measurement_type").isNotNull()) &
+                (F.col("meter_id").isNotNull()) &
+                (F.col("timestamp").isNotNull()) &
+                (F.col("value") >= 0) &
+                (F.col("value") <= 100000) &
+                (F.col("meter_id") > 0) &
+                (F.col("measurement_type").isin(["Pulse1", "Pulse1_Total", "Battery", "DeviceTemperature"]))
+            ).repartition(200, F.col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK)
 
             logger.info(f"Enriched and filtered {filtered_df.count()} records")
 
             # Daily aggregation
             daily_stats = filtered_df \
-                .withColumn("date", to_date(col("timestamp"))) \
-                .withColumn("year", year(col("timestamp"))) \
-                .withColumn("month", month(col("timestamp"))) \
+                .withColumn("date", F.to_date(F.col("timestamp"))) \
+                .withColumn("year", F.year(F.col("timestamp"))) \
+                .withColumn("month", F.month(F.col("timestamp"))) \
                 .groupBy("date", "year", "month", "meter_id", "measurement_type", "meter_type", "suburb", "usage_type") \
                 .agg(
-                    sum("value").alias("total_value"),
-                    avg("value").alias("avg_value"),
-                    max("value").alias("max_value"),
-                    min("value").alias("min_value"),
-                    count("*").alias("reading_count"),
-                    current_timestamp().alias("processed_time")
-                ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+                    F.sum(F.col("value")).alias("total_value"),
+                    F.avg(F.col("value")).alias("avg_value"),
+                    F.max(F.col("value")).alias("max_value"),
+                    F.min(F.col("value")).alias("min_value"),
+                    F.count("*").alias("reading_count"),
+                    F.current_timestamp().alias("processed_time")
+                ).persist(StorageLevel.MEMORY_AND_DISK)
 
             # Anomaly detection
             problem_meters = daily_stats.filter(
-                ((col("measurement_type") == "Pulse1_Total") & (col("total_value") > self.config.HIGH_CONSUMPTION_THRESHOLD)) |
-                ((col("measurement_type") == "Battery") & (col("avg_value") < self.config.LOW_BATTERY_THRESHOLD)) |
-                ((col("measurement_type") == "DeviceTemperature") & (col("max_value") > self.config.HIGH_TEMP_THRESHOLD))
+                ((F.col("measurement_type") == "Pulse1_Total") & (F.col("total_value") > self.config.HIGH_CONSUMPTION_THRESHOLD)) |
+                ((F.col("measurement_type") == "Battery") & (F.col("avg_value") < self.config.LOW_BATTERY_THRESHOLD)) |
+                ((F.col("measurement_type") == "DeviceTemperature") & (F.col("max_value") > self.config.HIGH_TEMP_THRESHOLD))
             ).withColumn("issue_type",
-                when((col("measurement_type") == "Pulse1_Total") & (col("total_value") > self.config.HIGH_CONSUMPTION_THRESHOLD), "HIGH_CONSUMPTION")
-                .when((col("measurement_type") == "Battery") & (col("avg_value") < self.config.LOW_BATTERY_THRESHOLD), "LOW_BATTERY")
+                F.when((F.col("measurement_type") == "Pulse1_Total") & (F.col("total_value") > self.config.HIGH_CONSUMPTION_THRESHOLD), "HIGH_CONSUMPTION")
+                .when((F.col("measurement_type") == "Battery") & (F.col("avg_value") < self.config.LOW_BATTERY_THRESHOLD), "LOW_BATTERY")
                 .otherwise("HIGH_TEMPERATURE")
             ).withColumn("severity",
-                when(col("issue_type") == "HIGH_CONSUMPTION", "WARNING")
-                .when(col("issue_type") == "LOW_BATTERY", "CRITICAL")
+                F.when(F.col("issue_type") == "HIGH_CONSUMPTION", "WARNING")
+                .when(F.col("issue_type") == "LOW_BATTERY", "CRITICAL")
                 .otherwise("WARNING")
-            ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+            ).persist(StorageLevel.MEMORY_AND_DISK)
 
             # Write daily stats
             record_count = daily_stats.count()
@@ -119,11 +121,11 @@ class BatchProcessor:
             # Monthly stats
             monthly_stats = daily_stats.groupBy("year", "month", "meter_id", "measurement_type", "meter_type", "suburb", "usage_type") \
                 .agg(
-                    sum("total_value").alias("monthly_total"),
-                    avg("avg_value").alias("monthly_avg"),
-                    max("max_value").alias("monthly_max"),
-                    count("*").alias("days_active")
-                ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+                    F.sum(F.col("total_value")).alias("monthly_total"),
+                    F.avg(F.col("avg_value")).alias("monthly_avg"),
+                    F.max(F.col("max_value")).alias("monthly_max"),
+                    F.count("*").alias("days_active")
+                ).persist(StorageLevel.MEMORY_AND_DISK)
 
             monthly_partitions = max(1, min(50, monthly_stats.count() // 10000))
             monthly_stats.coalesce(monthly_partitions).write \
