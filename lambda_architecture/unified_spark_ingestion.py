@@ -1,79 +1,29 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
-from pyspark.sql.types import *
-import logging, sys, schedule, time
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+import logging, sys
 
 # Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]  # ensures visibility in Docker logs
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("UnifiedSparkIngestion")
 
-class UnifiedSparkIngestion:
+DELTA_PATH = "hdfs://namenode:8020/data/water_meter/raw_delta/"
+CHECKPOINT_PATH = "hdfs://namenode:8020/data/water_meter/checkpoints/ingestion/"
+
+class UnifiedSparkIngestionStreaming:
     def __init__(self):
         self.spark = SparkSession.builder \
-            .appName("WaterMeterUnifiedIngestion") \
+            .appName("WaterMeterUnifiedIngestionStreaming") \
             .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .getOrCreate()
-        logger.info("Spark session started successfully.")
-    
-    def batch_ingestion(self):
-        """Batch layer: Kafka to HDFS"""
-        try: 
-            df = self.spark \
-                .read \
-                .format("kafka") \
-                .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092") \
-                .option("subscribe", "water-meter-readings") \
-                .option("startingOffsets", "latest") \
-                .load()
-            
-            parsed_df = df.select(
-                from_json(col("value").cast("string"), self.get_schema()).alias("data")
-            ).select("data.*").withColumn("date", to_date(col("timestamp")))
-            
-            count = parsed_df.count()
-            logger.info(f"✅ Read {count} records from Kafka")
+        logger.info("Spark session started successfully with Delta support.")
 
-            parsed_df.write \
-                .mode("append") \
-                .partitionBy("date") \
-                .parquet("hdfs://namenode:8020/data/water_meter/raw/")
-            
-            logger.info(f"✅ Wrote {count} records to HDFS")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Batch ingestion failed: {e}")
-            return False
-    
-    # def streaming_ingestion(self):
-    #     """Speed layer: Real-time processing"""
-    #     df = self.spark \
-    #         .readStream \
-    #         .format("kafka") \
-    #         .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092") \
-    #         .option("subscribe", "water-meter-readings") \
-    #         .load()
-        
-    #     parsed_df = df.select(
-    #         from_json(col("value").cast("string"), self.get_schema()).alias("data")
-    #     ).select("data.*")
-        
-    #     es_query = parsed_df.writeStream \
-    #         .outputMode("append") \
-    #         .format("org.elasticsearch.spark.sql") \
-    #         .option("es.resource", "water-meter-realtime") \
-    #         .option("es.nodes", "elasticsearch") \
-    #         .option("es.port", "9200") \
-    #         .option("checkpointLocation", "/tmp/es-checkpoint") \
-    #         .trigger(processingTime='10 seconds') \
-    #         .start()
-        
-    #     logger.info("🚀 Streaming ingestion to Elasticsearch started")
-    #     return es_query
-    
     def get_schema(self):
         return StructType([
             StructField("meter_id", StringType()),
@@ -84,27 +34,36 @@ class UnifiedSparkIngestion:
             StructField("value", DoubleType()),
         ])
 
+    def start_streaming_ingestion(self):
+        """Structured Streaming: Kafka → Delta, trigger 2 phút"""
+        try:
+            df = self.spark.readStream.format("kafka") \
+                .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092") \
+                .option("subscribe", "water-meter-readings") \
+                .option("startingOffsets", "latest") \
+                .load()
+
+            parsed_df = df.select(
+                from_json(col("value").cast("string"), self.get_schema()).alias("data")
+            ).select("data.*") \
+             .withColumn("timestamp", to_timestamp(col("timestamp"))) \
+             .withColumn("date", to_date(col("timestamp")))
+
+            query = parsed_df.writeStream \
+                .format("delta") \
+                .outputMode("append") \
+                .option("checkpointLocation", CHECKPOINT_PATH) \
+                .option("mergeSchema", "true") \
+                .partitionBy("date") \
+                .trigger(processingTime="2 minutes") \
+                .start(DELTA_PATH)
+
+            logger.info("⏱ Streaming ingestion started (trigger 2 minutes).")
+            query.awaitTermination()
+
+        except Exception as e:
+            logger.error(f"❌ Streaming ingestion failed: {e}")
+
 if __name__ == "__main__":
-    ingestion = UnifiedSparkIngestion()
-    
-    # batch_success = ingestion.batch_ingestion()
-
-    # Schedule every 2 minutes (you can change it)
-    schedule.every(2).minutes.do(ingestion.batch_ingestion)
-
-    logger.info("⏱ Batch ingestion scheduler started (every 2 minutes).")
-
-    # Keep scheduler alive
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(10)  # check every 10 seconds
-    except KeyboardInterrupt:
-        logger.info("🛑 Scheduler stopped manually.")
-    
-    # es_query = ingestion.streaming_ingestion()
-    # try:
-    #     es_query.awaitTermination()
-    # except KeyboardInterrupt:
-    #     es_query.stop()
-    #     logger.info("Streaming ingestion stopped by user.")
+    ingestion = UnifiedSparkIngestionStreaming()
+    ingestion.start_streaming_ingestion()

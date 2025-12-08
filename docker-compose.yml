@@ -49,39 +49,6 @@ services:
     networks:
       - spark-net
 
-  # kafka-connect:
-  #   image: confluentinc/cp-kafka-connect:7.4.0
-  #   container_name: kafka-connect
-  #   depends_on:
-  #     - kafka
-  #     - namenode
-  #   environment:
-  #     CONNECT_BOOTSTRAP_SERVERS: kafka:9092
-  #     CONNECT_REST_ADVERTISED_HOST_NAME: 0.0.0.0
-  #     CONNECT_REST_PORT: 8083
-  #     CONNECT_GROUP_ID: "connect-cluster"
-
-  #     CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
-  #     CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
-  #     CONNECT_STATUS_STORAGE_TOPIC: "connect-statuses"
-
-  #     CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-  #     CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-  #     CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-
-  #     CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
-  #     CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-  #     CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-
-  #     CONNECT_PLUGIN_PATH: "/usr/share/java,/connectors"
-
-  #   ports:
-  #     - "8083:8083"
-  #   volumes:
-  #     - ./connectors:/connectors
-  #   networks:
-  #     - spark-net
-
   spark-master:
     image: apache/spark:3.5.0
     container_name: spark-master
@@ -215,6 +182,31 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - XPACK_SECURITY_ENABLED=false
+    networks:
+      - spark-net
+
+  spark-thrift:
+    image: apache/spark:3.5.0
+    container_name: spark-thrift
+    depends_on:
+      - spark-master
+    mem_limit: 700m
+    mem_reservation: 300m
+    command: >
+      /opt/spark/sbin/start-thriftserver.sh
+      --master spark://spark-master:7077
+      --hiveconf hive.server2.thrift.port=10000
+      --hiveconf hive.server2.thrift.bind.host=0.0.0.0
+      --hiveconf spark.sql.warehouse.dir=/tmp/spark-warehouse
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - PYTHONPATH=/opt/spark-apps/lambda_architecture
+    ports:
+      - "10000:10000" # Thrift JDBC
+      - "10002:10002" # Optional HS2 WebUI
+    volumes:
+      - ./lambda_architecture:/opt/spark-apps/lambda_architecture
+      - ./data/managedobject_details.csv:/tmp/managedobject_details.csv
     networks:
       - spark-net
 

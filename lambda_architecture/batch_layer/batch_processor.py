@@ -14,8 +14,6 @@ sys.path.insert(0, parent_dir)
 from config import Config
 from data_enrichment import SparkDataEnrichment
 from data_cleaning import DataCleaner
-from schema_registry import SchemaRegistry
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,62 +27,56 @@ class BatchProcessor:
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
             .config("spark.sql.adaptive.skewJoin.enabled", "true") \
             .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .getOrCreate()
-        
+
         self.spark.sparkContext.setLogLevel("WARN")
         self.cleaner = DataCleaner(self.spark)
         self.enricher = SparkDataEnrichment(self.spark)
-        
-        # Metadata is now handled directly in Spark DataFrames
-        logger.info("BatchProcessor initialized successfully")
-    
+        logger.info("BatchProcessor initialized successfully with Delta support")
+
     def process_historical_data(self, input_path=None, output_path=None):
-        input_path = input_path or self.config.HDFS_RAW_PATH
+        input_path = input_path or "hdfs://namenode:8020/data/water_meter/raw_delta/"
         output_path = output_path or self.config.HDFS_BATCH_PATH
-        
+
         try:
             logger.info(f"Processing raw historical data from {input_path}")
-            
-            # Check if input path exists and has data with better error handling
+
+            # Read Delta or fallback to JSON
             try:
-                # Use optimized read with schema inference disabled for better performance
-                raw_df = self.spark.read \
-                    .option("multiline", "true") \
-                    .option("inferSchema", "false") \
-                    .json(input_path)
-                
-                record_count = raw_df.count()
-                if record_count == 0:
-                    logger.warning(f"No data found in {input_path}")
-                    return None, None, None
-                    
-                logger.info(f"Found {record_count} raw records to process")
-                
-            except FileNotFoundError:
-                logger.error(f"Input path not found: {input_path}")
-                return None, None, None
+                raw_df = self.spark.read.format("delta").load(input_path)
+                logger.info("Loaded Delta data successfully")
             except Exception as e:
-                logger.error(f"Failed to read data from {input_path}: {e}")
-                raise
-            
-            # Enrich raw data with metadata via join
+                logger.warning(f"Delta not found or failed to read, fallback to JSON: {e}")
+                raw_df = self.spark.read.option("multiline", "true").json(input_path)
+                logger.info("Loaded JSON data successfully")
+
+            record_count = raw_df.count()
+            if record_count == 0:
+                logger.warning(f"No data found in {input_path}")
+                return None, None, None
+
+            logger.info(f"Found {record_count} raw records to process")
+
+            # Enrich raw data
             enriched_df = self.enricher.enrich_dataframe(raw_df)
-            
-            # Enhanced data quality filtering with validation and optimization
+
+            # Filter & validation
             filtered_df = enriched_df.filter(
-                (col("value").isNotNull()) & 
+                (col("value").isNotNull()) &
                 (col("measurement_type").isNotNull()) &
                 (col("meter_id").isNotNull()) &
                 (col("timestamp").isNotNull()) &
                 (col("value") >= 0) &
-                (col("value") <= 100000) &  # Reasonable upper bound
+                (col("value") <= 100000) &
                 (col("meter_id") > 0) &
                 (col("measurement_type").isin(["Pulse1", "Pulse1_Total", "Battery", "DeviceTemperature"]))
-            ).repartition(200, col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK_SER)  # Optimize partition count
-            
+            ).repartition(200, col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK_SER)
+
             logger.info(f"Enriched and filtered {filtered_df.count()} records")
-            
-            # Optimized daily aggregations with broadcast join hint
+
+            # Daily aggregation
             daily_stats = filtered_df \
                 .withColumn("date", to_date(col("timestamp"))) \
                 .withColumn("year", year(col("timestamp"))) \
@@ -97,9 +89,9 @@ class BatchProcessor:
                     min("value").alias("min_value"),
                     count("*").alias("reading_count"),
                     current_timestamp().alias("processed_time")
-                ).persist(StorageLevel.MEMORY_AND_DISK_SER)  # Optimized storage level
-            
-            # Enhanced anomaly detection
+                ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+            # Anomaly detection
             problem_meters = daily_stats.filter(
                 ((col("measurement_type") == "Pulse1_Total") & (col("total_value") > self.config.HIGH_CONSUMPTION_THRESHOLD)) |
                 ((col("measurement_type") == "Battery") & (col("avg_value") < self.config.LOW_BATTERY_THRESHOLD)) |
@@ -112,88 +104,68 @@ class BatchProcessor:
                 when(col("issue_type") == "HIGH_CONSUMPTION", "WARNING")
                 .when(col("issue_type") == "LOW_BATTERY", "CRITICAL")
                 .otherwise("WARNING")
-            )
-            
-            # Optimized write with proper file sizing to prevent small files problem
-            logger.info("Writing daily stats to HDFS")
-            # Calculate optimal partitions based on data size
+            ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+            # Write daily stats
             record_count = daily_stats.count()
-            optimal_partitions = max(1, min(200, record_count // 50000))  # ~50k records per file
-            
+            optimal_partitions = max(1, min(200, record_count // 50000))
             daily_stats.coalesce(optimal_partitions).write \
+                .format("delta") \
                 .mode("overwrite") \
-                .option("compression", "snappy") \
-                .option("parquet.block.size", "134217728")  \
-                .option("parquet.page.size", "1048576") \
+                .option("mergeSchema", "true") \
                 .partitionBy("year", "month") \
-                .parquet(f"{output_path}/daily_stats")
-            
-            # Monthly aggregations with suburb-level insights
-            monthly_stats = daily_stats \
-                .groupBy("year", "month", "meter_id", "measurement_type", "meter_type", "suburb", "usage_type") \
+                .save(f"{output_path}/daily_stats")
+
+            # Monthly stats
+            monthly_stats = daily_stats.groupBy("year", "month", "meter_id", "measurement_type", "meter_type", "suburb", "usage_type") \
                 .agg(
                     sum("total_value").alias("monthly_total"),
                     avg("avg_value").alias("monthly_avg"),
                     max("max_value").alias("monthly_max"),
                     count("*").alias("days_active")
-                )
-            
-            logger.info("Writing monthly stats to HDFS")
-            monthly_record_count = monthly_stats.count()
-            monthly_partitions = max(1, min(50, monthly_record_count // 10000))
-            
+                ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+            monthly_partitions = max(1, min(50, monthly_stats.count() // 10000))
             monthly_stats.coalesce(monthly_partitions).write \
+                .format("delta") \
                 .mode("overwrite") \
-                .option("compression", "snappy") \
-                .option("parquet.block.size", "134217728") \
+                .option("mergeSchema", "true") \
                 .partitionBy("year", "month") \
-                .parquet(f"{output_path}/monthly_stats")
-            
-            # Save problem meters with enhanced metadata
-            logger.info("Writing problem meters to HDFS")
-            problem_record_count = problem_meters.count()
-            problem_partitions = max(1, min(10, problem_record_count // 5000))
-            
+                .save(f"{output_path}/monthly_stats")
+
+            # Problem meters
+            problem_partitions = max(1, min(10, problem_meters.count() // 5000))
             problem_meters.coalesce(problem_partitions).write \
+                .format("delta") \
                 .mode("overwrite") \
-                .option("compression", "snappy") \
-                .option("parquet.block.size", "134217728") \
+                .option("mergeSchema", "true") \
                 .partitionBy("year", "month") \
-                .parquet(f"{output_path}/problem_meters")
-            
+                .save(f"{output_path}/problem_meters")
+
             logger.info("Batch processing completed successfully")
+
+            # Cleanup persisted DataFrames
+            filtered_df.unpersist()
+            daily_stats.unpersist()
+            monthly_stats.unpersist()
+            problem_meters.unpersist()
+
             return daily_stats, monthly_stats, problem_meters
-            
+
         except Exception as e:
             logger.error(f"Batch processing failed: {e}")
             raise
-    
+
     def run_batch_job(self, input_path=None, output_path=None):
         try:
             logger.info("Starting batch processing job")
-            daily_stats, monthly_stats, problem_meters = self.process_historical_data(input_path, output_path)
-            
-            if daily_stats:
-                logger.info(f"Processed {daily_stats.count()} daily aggregations")
-                logger.info(f"Generated {monthly_stats.count()} monthly aggregations")
-                logger.info(f"Identified {problem_meters.count()} problem meters")
-            
-            return daily_stats, monthly_stats, problem_meters
-            
+            return self.process_historical_data(input_path, output_path)
         except Exception as e:
             logger.error(f"Batch job failed: {e}")
             raise
         finally:
-            # Clean up cached DataFrames
-            try:
-                if 'filtered_df' in locals():
-                    filtered_df.unpersist()
-                if 'daily_stats' in locals():
-                    daily_stats.unpersist()
-            except Exception as e:
-                logger.warning(f"Error during cleanup: {e}")
-            
             self.spark.stop()
+
 
 if __name__ == "__main__":
     try:

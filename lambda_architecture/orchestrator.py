@@ -14,7 +14,8 @@ class LambdaOrchestrator:
         cmd = [
             "docker", "exec", "spark-master",
             "/opt/spark/bin/spark-submit",
-            "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1",
+            # "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
+            "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_2.12:3.1.0",
             "--master", "spark://spark-master:7077",
             "/opt/spark-apps/lambda_architecture/unified_spark_ingestion.py"
         ]
@@ -23,38 +24,24 @@ class LambdaOrchestrator:
         print("✓ Data ingestion started")
 
     def start_batch_layer(self):
-        """Schedule batch jobs every hour"""
+        """Batch Layer every hour → Delta Lake"""
         def run_batch():
             while True:
-                print("Running batch processing...")
-
-                # 1️⃣ Upload batch data from HDFS Docker → DBFS
-                self.upload_hdfs_to_dbfs()
-
-                # 2️⃣ Trigger Spark batch job in Databricks
-                # Bạn có thể trigger bằng Databricks Jobs API hoặc spark-submit nếu cluster tự quản
-                subprocess.run([
-                    "databricks", "jobs", "run-now",
-                    "--job-id", os.getenv("DATABRICKS_JOB_ID")
-                ], check=True)
-
-                # Run batch processing
+                print("Running batch processing → Delta Lake...")
                 subprocess.run([
                     "docker", "exec", "spark-master",
                     "/opt/spark/bin/spark-submit",
                     "--master", "spark://spark-master:7077",
-                    "/opt/spark-apps/lambda_architecture/local_spark_batch.py"
-                ])
+                    "--packages", "io.delta:delta-core_2.12:2.4.0",
+                    "/opt/spark-apps/lambda_architecture/batch_layer/batch_processor.py"
+                ], check=True)
+                print("✓ Batch to Delta Lake completed")
+                time.sleep(120)  # every hour
 
-                # Run analytics
-                subprocess.run(["python", os.path.join(self.base_path, "hive_analytics.py")])
-                print("✓ Batch processing completed")
-                time.sleep(3600)  # 1 hour
-        
         thread = threading.Thread(target=run_batch, daemon=True)
         thread.start()
-        print("✓ Batch layer scheduled (runs every hour)")
-        print("Batch Layer → HDFS → Databricks → Hive → Tableau")
+        print("✓ Batch layer scheduled (Delta Lake, local Docker)")
+
 
     def start_speed_layer(self):
         """Start Speed Layer (Real-time streaming)"""
@@ -108,7 +95,7 @@ class LambdaOrchestrator:
         print("=" * 50)
         
         # Setup metadata first
-        # self.setup_metadata()
+        self.setup_metadata()
         # if not self.setup_metadata():
         #     print("Cannot proceed without metadata. Exiting.")
         #     sys.exit(1)
@@ -116,10 +103,10 @@ class LambdaOrchestrator:
         # self.start_data_ingestion()
         
         # Start Speed Layer (Real-time)
-        self.start_speed_layer()
+        # self.start_speed_layer()
         
         # Start Batch Layer (Scheduled)
-        # self.start_batch_layer()
+        self.start_batch_layer()
         
         print("\nBatch and Speed layers running separately!")
         print("\nReal-time Flow:")
