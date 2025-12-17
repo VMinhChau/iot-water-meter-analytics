@@ -1,6 +1,5 @@
 from pyspark.sql import SparkSession
-import pandas as pd
-
+# import pandas as pd
 class TableauHiveConnector:
     def __init__(self):
         self.spark = SparkSession.builder \

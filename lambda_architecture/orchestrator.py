@@ -15,7 +15,7 @@ class LambdaOrchestrator:
             "docker", "exec", "spark-master",
             "/opt/spark/bin/spark-submit",
             # "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
-            "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_2.12:3.1.0",
+            "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_3.12:3.0.0",
             "--master", "spark://spark-master:7077",
             "/opt/spark-apps/lambda_architecture/unified_spark_ingestion.py"
         ]
@@ -32,7 +32,7 @@ class LambdaOrchestrator:
                     "docker", "exec", "spark-master",
                     "/opt/spark/bin/spark-submit",
                     "--master", "spark://spark-master:7077",
-                    "--packages", "io.delta:delta-core_2.12:2.4.0",
+                    "--jars", "/opt/spark/jars/delta-spark_2.12-3.2.0.jar",
                     "/opt/spark-apps/lambda_architecture/batch_layer/batch_processor.py"
                 ], check=True)
                 print("✓ Batch to Delta Lake completed")
