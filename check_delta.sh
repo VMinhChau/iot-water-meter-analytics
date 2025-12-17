@@ -1,26 +1,23 @@
 #!/bin/bash
 # Check delta hdfs after batch processing
-# Variables
 CONTAINER="spark-master"
 DELTA_PATH="hdfs://namenode:8020/data/water_meter/batch/daily_stats"
 
-echo "🚀 Running Delta check inside $CONTAINER ..."
+echo "Running Delta check inside $CONTAINER ..."
 
 docker exec -it $CONTAINER bash -c "
-/opt/spark/bin/pyspark --packages io.delta:delta-core_2.12:2.4.0 << 'EOF'
+/opt/spark/bin/pyspark --jars /opt/spark/jars/delta-spark_2.12-3.2.0.jar,/opt/spark/jars/delta-storage-3.2.0.jar << EOF
 from pyspark.sql import SparkSession
-from delta.tables import DeltaTable
 from pyspark.sql.functions import sum, avg, min, max
 
-spark = SparkSession.builder \
-    .appName('DeltaCheck') \
-    .config('spark.sql.extensions', 'io.delta.sql.DeltaSparkSessionExtension') \
-    .config('spark.sql.catalog.spark_catalog', 'org.apache.spark.sql.delta.catalog.DeltaCatalog') \
+spark = SparkSession.builder \\
+    .appName('DeltaCheck') \\
+    .config('spark.sql.extensions', 'io.delta.sql.DeltaSparkSessionExtension') \\
+    .config('spark.sql.catalog.spark_catalog', 'org.apache.spark.sql.delta.catalog.DeltaCatalog') \\
     .getOrCreate()
 
-# Load Delta table using full HDFS URI
-dt = DeltaTable.forPath(spark, '$DELTA_PATH')
-df = dt.toDF()
+# Load Delta table
+df = spark.read.format('delta').load('$DELTA_PATH')
 
 print('=== 10 first rows ===')
 df.show(10)

@@ -32,7 +32,7 @@ class LambdaOrchestrator:
                     "docker", "exec", "spark-master",
                     "/opt/spark/bin/spark-submit",
                     "--master", "spark://spark-master:7077",
-                    "--jars", "/opt/spark/jars/delta-spark_2.12-3.0.0.jar",
+                    "--jars", "/opt/spark/jars/delta-spark_2.12-3.2.0.jar",
                     "/opt/spark-apps/lambda_architecture/batch_layer/batch_processor.py"
                 ], check=True)
                 print("✓ Batch to Delta Lake completed")

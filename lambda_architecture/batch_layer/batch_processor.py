@@ -43,6 +43,29 @@ class BatchProcessor:
         try:
             logger.info(f"Processing raw historical data from {input_path}")
 
+            # Ensure raw_delta path exists using Hadoop FileSystem (reliable check)
+            from pyspark.sql.types import StructType, StructField, LongType, TimestampType, StringType, DoubleType
+            hadoop_conf = self.spark._jsc.hadoopConfiguration()
+            jvm = self.spark._jvm
+
+            uri = jvm.java.net.URI(input_path)
+            path_obj = jvm.org.apache.hadoop.fs.Path(uri)
+
+            fs = jvm.org.apache.hadoop.fs.FileSystem.get(uri, hadoop_conf)
+
+            if not fs.exists(path_obj):
+                logger.warning(f"{input_path} does not exist. Creating minimal Delta table.")
+                minimal_schema = StructType([
+                    StructField("meter_id", LongType(), True),
+                    StructField("timestamp", TimestampType(), True),
+                    StructField("measurement_type", StringType(), True),
+                    StructField("value", DoubleType(), True)
+                ])
+                empty_rdd = self.spark.sparkContext.emptyRDD()
+                empty_df = self.spark.createDataFrame(empty_rdd, minimal_schema)
+                empty_df.write.format("delta").mode("overwrite").save(input_path)
+                logger.info(f"Created minimal Delta directory at {input_path}")
+
             raw_df = self.spark.read.format("delta").load(input_path)
             logger.info("Loaded Delta data successfully")
 
