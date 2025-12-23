@@ -1,6 +1,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
+from pyspark.sql import DataFrame
 from pyspark import StorageLevel
 import logging
 import os
@@ -53,26 +54,27 @@ class BatchProcessor:
 
             logger.info(f"Found {record_count} raw records to process")
 
-            # Enrich raw data
-            enriched_df = self.enricher.enrich_dataframe(raw_df)
+            # Clean IoT data first
+            cleaned_df = self.enricher.clean_iot_data(raw_df)
+            logger.info(f"Cleaned data: {cleaned_df.count()} records")
 
-            # Rename columns to be SQL/Tableau friendly
-            if 'Meter Type' in enriched_df.columns:
-                enriched_df = enriched_df.withColumnRenamed('Meter Type', 'meter_type')
-            if 'Usage Type' in enriched_df.columns:
-                enriched_df = enriched_df.withColumnRenamed('Usage Type', 'usage_type')
-            if 'Suburb' in enriched_df.columns:
-                enriched_df = enriched_df.withColumnRenamed('Suburb', 'suburb')
+            # Enrich with metadata (skip cleaning since already done)
+            enriched_df = self.enricher.enrich_dataframe(cleaned_df, skip_cleaning=True)
 
-            # Filter & validation
+            # Rename columns to be SQL/Tableau friendly (check if columns exist after cleaning)
+            column_mapping = {
+                'Meter Type': 'meter_type',
+                'Usage Type': 'usage_type', 
+                'Suburb': 'suburb',
+                'Postcode': 'postcode'
+            }
+            
+            for old_col, new_col in column_mapping.items():
+                if old_col in enriched_df.columns:
+                    enriched_df = enriched_df.withColumnRenamed(old_col, new_col)
+
+            # Additional filtering for batch processing
             filtered_df = enriched_df.filter(
-                (F.col("value").isNotNull()) &
-                (F.col("measurement_type").isNotNull()) &
-                (F.col("meter_id").isNotNull()) &
-                (F.col("timestamp").isNotNull()) &
-                (F.col("value") >= 0) &
-                (F.col("value") <= 100000) &
-                (F.col("meter_id") > 0) &
                 (F.col("measurement_type").isin(["Pulse1", "Pulse1_Total", "Battery", "DeviceTemperature"]))
             ).repartition(200, F.col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -108,15 +110,23 @@ class BatchProcessor:
                 .otherwise("WARNING")
             ).persist(StorageLevel.MEMORY_AND_DISK)
 
-            # Write daily stats
+            # Write daily stats to a new separate path to avoid schema conflict
             record_count = daily_stats.count()
             optimal_partitions = max(1, min(200, record_count // 50000))
+            daily_stats_path = f"{output_path}/daily_stats_v2"
+
             daily_stats.coalesce(optimal_partitions).write \
                 .format("delta") \
                 .mode("overwrite") \
                 .option("mergeSchema", "true") \
                 .partitionBy("year", "month") \
-                .save(f"{output_path}/daily_stats")
+                .save(daily_stats_path)
+
+            # Optional CSV export
+            daily_stats.coalesce(1).write \
+                .mode("overwrite") \
+                .option("header", "true") \
+                .csv(f"{output_path}/daily_stats_v2_csv")
 
             # Monthly stats
             monthly_stats = daily_stats.groupBy("year", "month", "meter_id", "measurement_type", "meter_type", "suburb", "usage_type") \
@@ -132,8 +142,14 @@ class BatchProcessor:
                 .format("delta") \
                 .mode("overwrite") \
                 .option("mergeSchema", "true") \
+                .option("overwriteSchema", "true") \
                 .partitionBy("year", "month") \
                 .save(f"{output_path}/monthly_stats")
+
+            monthly_stats.coalesce(1).write \
+                .mode("overwrite") \
+                .option("header", "true") \
+                .csv(f"{output_path}/monthly_stats_csv")
 
             # Problem meters
             problem_partitions = max(1, min(10, problem_meters.count() // 5000))
@@ -141,8 +157,14 @@ class BatchProcessor:
                 .format("delta") \
                 .mode("overwrite") \
                 .option("mergeSchema", "true") \
+                .option("overwriteSchema", "true") \
                 .partitionBy("year", "month") \
                 .save(f"{output_path}/problem_meters")
+
+            problem_meters.coalesce(1).write \
+                .mode("overwrite") \
+                .option("header", "true") \
+                .csv(f"{output_path}/problem_meters_csv")
 
             logger.info("Batch processing completed successfully")
 
@@ -172,8 +194,12 @@ class BatchProcessor:
 if __name__ == "__main__":
     try:
         processor = BatchProcessor()
-        daily_stats, monthly_stats, problem_meters = processor.run_batch_job()
-        logger.info("Batch processing completed successfully")
+        # Minimal fix: run only batch job on old data
+        daily_stats, monthly_stats, problem_meters = processor.run_batch_job(
+            input_path="hdfs://namenode:8020/data/water_meter/raw_delta/",
+            output_path="hdfs://namenode:8020/data/water_meter/batch"
+        )
+        logger.info("Batch processing completed successfully using old Delta data only")
     except Exception as e:
         logger.error(f"Batch processing failed: {e}")
         exit(1)

@@ -10,19 +10,19 @@ class LambdaOrchestrator:
         self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.project_root = sys.executable
 
-def start_batch_layer_once(self):
-    """Run Batch Layer once → Delta Lake"""
-    print("Running batch processing once → Delta Lake...")
-    subprocess.run([
-        "docker", "exec", "spark-master",
-        "/opt/spark/bin/spark-submit",
-        "--master", "spark://spark-master:7077",
-        "--packages", "io.delta:delta-spark_2.12:3.1.0",
-        "--conf", "spark.jars.ivy=/tmp/.ivy2",
-        "--executor-memory", "512m",
-        "/opt/spark-apps/lambda_architecture/batch_layer/batch_processor.py"
-    ], check=True)
-    print("✓ Batch to Delta Lake completed (one-time run)")
+    def start_batch_layer_once(self):
+        """Run Batch Layer once → Delta Lake"""
+        print("Running batch processing once → Delta Lake...")
+        subprocess.run([
+            "docker", "exec", "spark-master",
+            "/opt/spark/bin/spark-submit",
+            "--master", "spark://spark-master:7077",
+            "--packages", "io.delta:delta-spark_2.12:3.1.0",
+            "--conf", "spark.jars.ivy=/tmp/.ivy2",
+            "--executor-memory", "512m",
+            "/opt/spark-apps/lambda_architecture/batch_layer/batch_processor.py"
+        ], check=True)
+        print("✓ Batch to Delta Lake completed (one-time run)")
 
     def setup_metadata(self):
         """Upload metadata to HDFS before starting processing"""

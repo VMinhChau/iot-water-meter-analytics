@@ -15,14 +15,10 @@ echo ""
 echo "📊 Monitor data flow:"
 echo "- Kafka UI: http://localhost:8080"
 echo "- Kibana: http://localhost:5601"
+echo "- HDFS: http://localhost:9870"
+echo "- Spark Master: http://localhost:8081"
 echo ""
 echo "Press Ctrl+C to stop data generation..."
 
 # Start data generator
 python data_generator/water_meter_simulator.py
-
-# Cach clear spark cho speed layer
-Clear checkpoint
-Close orchestrator
-Close Spark master, worker
-Open again
