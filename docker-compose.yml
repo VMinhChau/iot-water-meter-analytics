@@ -188,25 +188,92 @@ services:
   spark-thrift:
     image: apache/spark:3.5.0
     container_name: spark-thrift
+    user: "0:0"
     depends_on:
-      - spark-master
+      namenode:
+        condition: service_healthy
+      hive-metastore-service:
+        condition: service_started
+      spark-master:
+        condition: service_started
     mem_limit: 700m
     mem_reservation: 300m
     command: >
       /opt/spark/sbin/start-thriftserver.sh
       --master spark://spark-master:7077
+      --packages io.delta:delta-spark_2.12:3.1.0
+      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
+      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
+      --conf spark.sql.warehouse.dir=hdfs://namenode:8020/user/hive/warehouse
+      --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore-service:9083
+      --conf spark.hadoop.javax.jdo.option.ConnectionURL=jdbc:mysql://hive-metastore:3306/metastore?useSSL=false&allowPublicKeyRetrieval=true
+      --conf spark.hadoop.javax.jdo.option.ConnectionDriverName=com.mysql.cj.jdbc.Driver
+      --conf spark.hadoop.javax.jdo.option.ConnectionUserName=hive
+      --conf spark.hadoop.javax.jdo.option.ConnectionPassword=hive
       --hiveconf hive.server2.thrift.port=10000
       --hiveconf hive.server2.thrift.bind.host=0.0.0.0
-      --hiveconf spark.sql.warehouse.dir=/tmp/spark-warehouse
     environment:
       - SPARK_NO_DAEMONIZE=true
       - PYTHONPATH=/opt/spark-apps/lambda_architecture
-    ports:
-      - "10000:10000" # Thrift JDBC
-      - "10002:10002" # Optional HS2 WebUI
     volumes:
       - ./lambda_architecture:/opt/spark-apps/lambda_architecture
       - ./data/managedobject_details.csv:/tmp/managedobject_details.csv
+      - spark-ivy:/home/spark/.ivy2
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    networks:
+      - spark-net
+
+    # Add to your docker-compose.yml
+  hive-metastore:
+      image: mysql:8.0  # [Fix 1] Pin to 8.0 to avoid 8.4 breaking changes
+      container_name: hive-metastore
+      environment:
+        MYSQL_ROOT_PASSWORD: root
+        MYSQL_DATABASE: metastore
+        MYSQL_USER: hive
+        MYSQL_PASSWORD: hive
+      command: --default-authentication-plugin=mysql_native_password
+      ports:
+        - "3306:3306"
+      volumes:
+        - hive-metastore-data:/var/lib/mysql
+
+  hive-metastore-service:
+    image: apache/hive:3.1.3
+    container_name: hive-metastore-service
+    depends_on:
+      - hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      # [Fix 2] Force Hive to use MapReduce (mr) to avoid 'TezConfiguration' error
+      HIVE_SITE_CONF_hive_execution_engine: "mr" 
+      
+      # [Fix 3] Configure MySQL Connection using HIVE_SITE_CONF vars
+      # This forces these values into hive-site.xml
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionURL: "jdbc:mysql://hive-metastore:3306/metastore?useSSL=false&allowPublicKeyRetrieval=true"
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionDriverName: "com.mysql.cj.jdbc.Driver"
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionUserName: "hive"
+      HIVE_SITE_CONF_javax_jdo_option_ConnectionPassword: "hive"
+    ports:
+      - "9083:9083"
+    volumes:
+      # You MUST still have the mysql jar file in your local folder
+      - ./mysql-connector-j-8.0.33.jar:/opt/hive/lib/mysql-connector-java.jar
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "Waiting for MySQL..."
+        while ! nc -z hive-metastore 3306; do sleep 1; done
+        
+        echo "Initializing Schema..."
+        # Try to init schema, ignore error if it already exists
+        /opt/hive/bin/schematool -dbType mysql -initSchema -verbose || true
+        
+        echo "Starting Metastore..."
+        /opt/hive/bin/hive --service metastore
     networks:
       - spark-net
 
@@ -214,3 +281,5 @@ volumes:
   namenode_data:
   datanode_data:
   es_data:
+  hive-metastore-data:
+  spark-ivy:

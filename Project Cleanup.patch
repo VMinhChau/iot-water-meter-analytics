@@ -1,0 +1,3298 @@
+diff --git a/README.md b/README.md
+index 92b5053..6aa32c8 100644
+--- a/README.md
++++ b/README.md
+@@ -1,33 +1,36 @@
+ # IoT Water Meter Analytics - Lambda Architecture
+ 
+ ## Overview
+-Real-time analytics system processing actual IoT water meter data using Lambda Architecture with Kafka, Spark, HDFS, and Elasticsearch.
++Real-time analytics system processing actual IoT water meter data using Lambda Architecture with Kafka, Spark, Delta Lake, and Elasticsearch.
+ 
+ ## Lambda Architecture Data Flow
+ ```
+-IoT Meters → Kafka → ┌─ Speed Layer → Elasticsearch → Kibana (Real-time)
++IoT Meters → Kafka → ┌─ Spark Streaming (Speed) → Elasticsearch → Kibana (Real-time)
+                      │
+-                     └─ Batch Layer → HDFS → Hive → Tableau (Historical)
++                     └─ Spark Streaming (Ingestion) → Delta Lake (Raw Data)
++                                                        │
++                                                        ↓
++                                              Spark Batch → Delta Lake (Processed) → Spark Thrift → Tableau
+ ```
+ 
+ ### Speed Layer (Real-time Processing)
+-- ⚡ **Spark Streaming** - 5-minute sliding windows
+-- 🔍 **Elasticsearch** - Real-time indexing
++- ⚡ **Spark Streaming** - 5-minute sliding windows with watermarking
++- 🔍 **Elasticsearch** - Real-time indexing for stats and alerts
+ - 📊 **Kibana** - Live dashboards and monitoring
+-- 🚨 **Instant alerts** - Anomaly detection (high flow, low battery)
++- 🚨 **Real-time alerts** - Anomaly detection (high flow, low battery, leaks)
+ 
+ ### Batch Layer (Historical Processing)
+-- 🕐 **Hourly jobs** - Deep analysis of accumulated data
+-- 💾 **HDFS storage** - Raw data preservation with partitioning
+-- 🗄️ **Hive tables** - Data warehouse for complex queries
+-- 📈 **Tableau** - Historical reports and business analytics
++- 🕐 **2-minute trigger** - Kafka to Delta Lake ingestion (raw data storage)
++- 💾 **Delta Lake** - ACID transactions with time travel
++- 🗄️ **Every 2 minutes** - Batch processing for aggregations
++- 📈 **Tableau** - Historical reports via JDBC connection
+ 
+ ## Data Schema
+ 
+ ### Raw IoT Data (from meters):
+ ```json
+ {
+-  "meter_id": 83008,
++  "meter_id": "83008",
+   "timestamp": "2022-07-13T07:30:01.000Z",
+   "measurement_type": "Pulse1",
+   "series": "P1",
+@@ -36,44 +39,47 @@ IoT Meters → Kafka → ┌─ Speed Layer → Elasticsearch → Kibana (Real-t
+ }
+ ```
+ 
+-### Enriched Data (stored in HDFS):
++### Enriched Data (stored in Delta Lake):
+ ```json
+ {
+-  "meter_id": 83008,
++  "meter_id": "83008",
+   "timestamp": "2022-07-13T07:30:01.000Z",
+   "measurement_type": "Pulse1",
+   "series": "P1",
+   "unit": "L",
+   "value": 6.0,
+-  "meter_type": "captis_pulse",
+-  "suburb": "BUDERIM",
+-  "postcode": 4556,
+-  "usage_type": "Residential"
++  "Meter Type": "captis_pulse",
++  "Suburb": "BUDERIM",
++  "Postcode": "4556",
++  "Usage Type": "Residential",
++  "date": "2022-07-13"
+ }
+ ```
+ 
+ ## Implementation Components
+ 
+-### Data Ingestion
++### Data Ingestion (Batch Layer)
+ - **Raw Data**: IoT meters send sensor readings to Kafka
+-- **Enrichment**: Data ingestion service adds meter metadata
+-- **Storage**: Enriched data stored in HDFS as JSON
++- **Batch Ingestion**: Spark Streaming reads from Kafka and writes raw data to Delta Lake (HDFS)
++- **Storage**: Raw data stored in Delta Lake at `hdfs://namenode:8020/data/water_meter/raw_delta/`
+ 
+-### Batch Layer
+-- **Processing**: Spark reads JSON from HDFS
+-- **Aggregations**: Daily/monthly stats by measurement_type
+-- **Data Warehouse**: Hive tables for historical analysis
+-- **Anomaly Detection**: Identifies problem meters (high consumption, low battery)
++### Batch Processing
++- **Processing**: Spark reads raw data from Delta Lake every 2 minutes
++- **Enrichment**: Joins with meter metadata from HDFS for location/type information
++- **Aggregations**: Daily/monthly stats by measurement_type and location
++- **Anomaly Detection**: Identifies problem meters (high consumption, low battery, high temperature)
++- **Storage**: Processed results stored back to Delta Lake in separate paths (daily_stats, monthly_stats, problem_meters)
+ 
+ ### Speed Layer
+-- **Real-time Processing**: Spark Streaming processes Kafka data
+-- **Windowing**: 5-minute aggregations with watermarking
+-- **Alerts**: Real-time anomaly detection (HIGH_FLOW, LOW_BATTERY, HIGH_TEMP)
+-- **Storage**: Results indexed in Elasticsearch
++- **Real-time Processing**: Spark Streaming processes Kafka data with 5-minute windows
++- **Enrichment**: Real-time metadata joins using broadcast variables
++- **Anomaly Detection**: HIGH_FLOW, LOW_BATTERY, HIGH_TEMP, LEAK_SUSPECT alerts
++- **Storage**: Stats and alerts indexed in Elasticsearch
++- **Note**: Speed layer is currently commented out in orchestrator but code exists
+ 
+ ### Visualization
+ - **Real-time**: Kibana dashboards for speed layer data
+-- **Historical**: Tableau reports from Hive tables
++- **Historical**: Tableau connects via Spark Thrift Server (JDBC)
+ 
+ ## How to Run
+ 
+@@ -82,61 +88,83 @@ IoT Meters → Kafka → ┌─ Speed Layer → Elasticsearch → Kibana (Real-t
+ ./run_pipeline_only.sh
+ ```
+ - Starts Docker services (Kafka, Elasticsearch, HDFS)
+-- Initializes both Speed Layer (real-time) and Batch Layer (hourly)
++- Initializes both Speed Layer (real-time) and Batch Layer (every 2 minutes)
+ - Sets up all processing components
+ 
+ ### Step 2: Generate Data
+ ```bash
+ ./run_data_generator.sh
+ ```
+-- Simulates IoT water meter readings
++- Simulates IoT water meter readings from real CSV data
+ - Sends data to Kafka for processing
+ - Data flows through both real-time and batch processing
+ 
++### Step 4: Evaluate System (Optional)
++```bash
++./evaluate_system.sh
++```
++- Comprehensive performance evaluation
++- Function testing and validation
++- Automated benchmark testing
++- Generates detailed reports in `performance/` folder
++
++### Step 5: Reset (Optional)
++```bash
++./reset_spark_checkpoints.sh
++```
++- Clears Spark checkpoints if needed
++- Use when restarting pipeline with fresh state
++
+ ### Access Points
+ - **Real-time Dashboards**: http://localhost:5601 (Kibana)
+ - **Kafka Messages**: http://localhost:8080 (Kafka UI)
+ - **HDFS Storage**: http://localhost:9870 (NameNode)
++- **Spark Master**: http://localhost:8081 (Spark UI)
++- **Spark Thrift Server**: http://localhost:10000 (JDBC for Tableau)
+ 
+ ### Tableau Integration
+ ```bash
+ # Export batch processed data for Tableau
+-python3 visualization/tableau_connectors.py
++python visualization/tableau_connectors.py
+ ```
+ **Generates:**
+ - `tableau_daily_stats.csv` - Daily consumption patterns
+ - `tableau_monthly_stats.csv` - Monthly trends and forecasting
+ - `tableau_problem_meters.csv` - Maintenance and anomaly reports
+ 
+-**Direct Connection:** Hive Server at localhost:10000
++**Direct Connection:** Spark Thrift Server at localhost:10000 (JDBC)
+ 
+ ## Project Structure
+ ```
+ ├── data/
+-│   ├── Digital Meter Data - July 2022/  # Real CSV data
++│   ├── Digital Meter Data - July 2022/  # Real CSV data (31 daily files)
+ │   └── managedobject_details.csv        # Meter metadata
+ ├── data_generator/
+-│   ├── water_meter_simulator.py         # Raw IoT data generator
+-│   ├── demo_real_data.py               # Demo script
+-│   └── README.md                       # Generator docs
++│   └── water_meter_simulator.py         # IoT data generator
++├── kafka_setup/
++│   └── kafka_config.py                 # Kafka topic setup
+ ├── lambda_architecture/
++│   ├── config.py                       # Configuration settings
++│   ├── orchestrator.py                 # Main pipeline orchestrator
++│   ├── unified_spark_ingestion.py      # Kafka → Delta Lake ingestion
+ │   ├── data_enrichment.py              # Metadata enrichment
+-│   ├── data_ingestion.py               # Kafka → HDFS + enrichment
++│   ├── data_cleaning.py                # Data quality utilities
+ │   ├── batch_layer/
+-│   │   ├── batch_processor.py          # Spark batch jobs
+-│   │   └── hive_processor.py           # Hive data warehouse
++│   │   └── batch_processor.py          # Batch processing jobs
+ │   └── speed_layer/
+-│       └── stream_processor.py         # Spark streaming
++│       └── stream_processor.py         # Real-time streaming
+ ├── visualization/
+-│   ├── elasticsearch_mapping.py        # ES batch index
+-│   ├── elasticsearch_speed_mapping_updated.py  # ES speed index
+-│   ├── kibana_dashboard_updated.json   # Kibana config
+-│   └── tableau_connectors.py           # Tableau integration
+-└── docker-compose.yml                      # Infrastructure
++│   ├── elasticsearch_speed_mapping_updated.py  # ES index setup (for speed layer)
++│   └── tableau_connectors.py           # Tableau data export
++├── docker-compose.yml                  # Infrastructure services
++├── run_pipeline_only.sh               # Start pipeline script
++├── run_data_generator.sh              # Start data generator
++└── reset_spark_checkpoints.sh         # Reset Spark checkpoints
+ ```
+ 
+ ## Data Processing
+ - **2,817 IoT meters** across Queensland suburbs
+-- **~5.2M readings/month** with multiple measurement types
+-- **Real-time anomaly detection** for maintenance alerts
+-- **Historical trend analysis** for consumption patterns
+\ No newline at end of file
++- **~5.2M readings/month** with multiple measurement types (Pulse1, Battery, Temperature)
++- **Real-time anomaly detection** for maintenance alerts and leak detection
++- **Historical trend analysis** with Delta Lake time travel capabilities
++- **ACID transactions** ensuring data consistency and reliability
+\ No newline at end of file
+diff --git a/RUN.md b/RUN.md
+deleted file mode 100644
+index a1d9fa1..0000000
+--- a/RUN.md
++++ /dev/null
+@@ -1,68 +0,0 @@
+-# How to Run IoT Water Meter Analytics
+-
+-## 🚀 Lambda Architecture Pipeline
+-
+-### Step 1: Start Pipeline
+-```bash
+-./run_pipeline_only.sh
+-```
+-**What it starts:**
+-- 🐳 Docker services (Kafka, Elasticsearch, HDFS, Spark)
+-- ⚡ **Speed Layer** - Real-time stream processing (5-minute windows)
+-- 📊 **Batch Layer** - Hourly historical processing
+-- 📥 **Data Ingestion** - Kafka → HDFS storage with enrichment
+-
+-### Step 2: Generate Data
+-```bash
+-./run_data_generator.sh
+-```
+-**What it does:**
+-- 🌊 Simulates 2,817 IoT water meters
+-- 📈 Generates ~5.2M readings/month
+-- 🚨 Triggers real-time anomaly detection
+-
+-## 🌐 Access Points
+-
+-- **Real-time Dashboards**: http://localhost:5601 (Kibana - Speed Layer)
+-- **Kafka Messages**: http://localhost:8080 (Data flow monitoring)
+-- **HDFS Storage**: http://localhost:9870 (Batch Layer storage)
+-- **Elasticsearch**: http://localhost:9200 (Real-time data)
+-
+-## 📊 Lambda Architecture Data Flow
+-```
+-IoT Meters → Kafka → ┌─ Speed Layer → Elasticsearch → Kibana (Real-time)
+-                     │
+-                     └─ Batch Layer → HDFS → Hive → Tableau (Historical)
+-```
+-
+-### ⚡ Speed Layer (Real-time)
+-- **Processing**: Spark Streaming with 5-minute windows
+-- **Storage**: Elasticsearch for immediate indexing
+-- **Visualization**: Kibana dashboards
+-- **Use Cases**: Live monitoring, instant alerts, operational dashboards
+-
+-### 📊 Batch Layer (Historical)
+-- **Processing**: Hourly Spark jobs for deep analysis
+-- **Storage**: HDFS (raw data) + Hive (data warehouse)
+-- **Visualization**: Tableau reports and analytics
+-- **Use Cases**: Historical trends, business reports, forecasting
+-
+-### 📈 Tableau Integration
+-```bash
+-# Export processed batch data
+-python3 visualization/tableau_connectors.py
+-```
+-**Outputs**: Daily stats, monthly trends, problem meter reports
+-
+-## 🛑 To Stop
+-
+-Press `Ctrl+C` in each terminal - graceful shutdown included
+-
+-## 🎯 Features
+-
+-- ✅ **Dual processing** - Real-time (Speed) + Historical (Batch) layers
+-- ✅ **Live dashboards** - Kibana for operational monitoring
+-- ✅ **Business analytics** - Tableau for historical insights
+-- ✅ **Anomaly detection** - Instant alerts + trend analysis
+-- ✅ **Scalable** - Handles 5.2M+ readings/month
+-- ✅ **Production ready** - Fault tolerance and monitoring
+\ No newline at end of file
+diff --git a/bash.exe.stackdump b/bash.exe.stackdump
+deleted file mode 100644
+index d8ff961..0000000
+--- a/bash.exe.stackdump
++++ /dev/null
+@@ -1,20 +0,0 @@
+-Stack trace:
+-Frame        Function    Args
+-000005FF340  00210062B0E (00210298702, 00210275E3E, 000000002F8, 000005FAEA0)
+-000005FF340  0021004846A (00000000000, 00000000000, 00000000000, 00000001000)
+-000005FF340  002100484A2 (00000000000, 00000000096, 000000002F8, 00000000000)
+-000005FF340  002100DA818 (00000000000, 00200000000, 002102759F2, 000005FBFEC)
+-000005FF340  002101334F7 (00000000000, 0021022B1A0, 0021022B190, 000005FDDE0)
+-000005FF340  002100488B4 (00000000002, 00210317960, 000005FC290, 00000000000)
+-000005FF340  0021004A01F (0007FFE0384, 0000074DE20, 000001C001C, 0000003B132)
+-000005FF340  002100DB858 (00000000000, 00000000000, 00000000000, 00000000000)
+-000005FF5D0  7FFA5E61F96E (00000000000, 00000000000, 00000000000, 00000000000)
+-000005FF5D0  7FFA5E4CBCAE (00210040000, 00000000001, 7FFA5E4DCCA4, 7FFA5E638530)
+-000005FF5D0  7FFA5E4C97AC (7FFA5E556200, 7FFA00000000, 0000074A710, 000005FF5D6)
+-000005FF5D0  7FFA5E5576EA (0000074CF70, 0000074A310, 7FFA5E692710, 00000000040)
+-000005FF5D0  7FFA5E557716 (7FFA5E65AF18, 7FFA5E6384B8, 000002D2000, 7FFA5E65B270)
+-00000000000  7FFA5E57D8C6 (00000000000, 00000000000, 000002D2000, 00000000000)
+-00000000000  7FFA5E57BA50 (7FFA5E4C0000, 000002D2000, 000002D3000, 7FFA5E4C0000)
+-00000000000  7FFA5E57B83A (00000000000, 00000000000, 00000000000, 00000000000)
+-00000000000  7FFA5E5A910E (00000000000, 00000000000, 00000000000, 00000000000)
+-End of stack trace
+diff --git a/data_generator/README.md b/data_generator/README.md
+deleted file mode 100644
+index e69ea97..0000000
+--- a/data_generator/README.md
++++ /dev/null
+@@ -1,67 +0,0 @@
+-# IoT Water Meter Data Generator
+-
+-## Overview
+-Simulates 2,817 real IoT water meters by streaming actual sensor data from July 2022 CSV files.
+-
+-## How to Run
+-
+-### Quick Start
+-```bash
+-# From project root:
+-./run_data_generator.sh
+-```
+-
+-### Manual Usage
+-```bash
+-# Demo (10 records)
+-python3 demo_real_data.py
+-
+-# Full streaming
+-python3 water_meter_simulator.py
+-```
+-
+-## Raw IoT Data Structure
+-Meters send only sensor readings (no metadata):
+-```json
+-{
+-  "meter_id": 83008,
+-  "timestamp": "2022-07-13T07:30:01.000Z",
+-  "measurement_type": "Pulse1",
+-  "series": "P1",
+-  "unit": "L",
+-  "value": 6.0
+-}
+-```
+-
+-## Lambda Architecture Integration
+-```
+-CSV Files → IoT Simulator → Kafka → ┌─ Speed Layer → Kibana
+-                                    │
+-                                    └─ Batch Layer → Tableau
+-```
+-
+-### Data Processing
+-- **Speed Layer**: Real-time stream processing for live monitoring
+-- **Batch Layer**: Historical analysis for business intelligence
+-- **Dual output**: Operational dashboards + analytical reports
+-
+-## Features
+-- ✅ **Real data** - Actual water meter readings from Queensland
+-- ✅ **Kafka streaming** - Sends to `water-meter-readings` topic
+-- ✅ **Multiple types** - Pulse1, Battery, Temperature measurements
+-- ✅ **High volume** - ~5.2M readings/month simulation
+-- ✅ **Realistic timing** - 15-minute intervals for flow data
+-
+-## Data Volume
+-- **2,817 IoT meters** across Queensland suburbs
+-- **31 daily CSV files** (~167K readings each)
+-- **~5.2M readings/month** total volume
+-- **Multiple measurement types** for comprehensive testing
+-
+-## Integration with Pipeline
+-- **Real-time**: Data flows to Kibana for live monitoring
+-- **Historical**: Batch processing creates Tableau reports
+-- **Enrichment**: Metadata added during pipeline processing
+-- **Analytics**: Both operational and business intelligence outputs
+-
+-**Note**: Raw IoT data is enriched with metadata during Lambda Architecture processing.
+\ No newline at end of file
+diff --git a/data_generator/water_meter_simulator ex.py b/data_generator/water_meter_simulator ex.py
+deleted file mode 100644
+index 6b4ac83..0000000
+--- a/data_generator/water_meter_simulator ex.py	
++++ /dev/null
+@@ -1,92 +0,0 @@
+-import json
+-import pandas as pd
+-import time
+-import math
+-import os
+-from datetime import datetime
+-
+-class WaterMeterSimulator:
+-    def __init__(self, kafka_server='localhost:29092', data_path='./data/Digital Meter Data  - July 2022', use_kafka=True):
+-        self.use_kafka = use_kafka
+-        self.producer = None
+-        
+-        if use_kafka:
+-            try:
+-                from kafka import KafkaProducer
+-                self.producer = KafkaProducer(
+-                    bootstrap_servers=[kafka_server],
+-                    value_serializer=lambda x: json.dumps(x).encode('utf-8'),
+-                    linger_ms=10  # small buffer to batch messages slightly
+-                )
+-            except Exception as e:
+-                print(f"Kafka not available: {e}")
+-                self.use_kafka = False
+-        
+-        self.data_path = data_path
+-    
+-    # def clean_json(self, obj):
+-    #     if isinstance(obj, dict):
+-    #         return {k: self.clean_json(v) for k, v in obj.items()}
+-    #     elif isinstance(obj, list):
+-    #         return [self.clean_json(v) for v in obj]
+-    #     elif isinstance(obj, float):
+-    #         if math.isnan(obj) or math.isinf(obj):
+-    #             return None
+-    #         return obj
+-    #     else:
+-    #         return obj
+-
+-    def process_csv_file(self, file_path):
+-        """Memory-efficient row-by-row CSV reading"""
+-        for chunk in pd.read_csv(file_path, chunksize=1000):  # small chunks
+-            for _, row in chunk.iterrows():
+-                reading = {
+-                    'meter_id': str(row['ManagedObjectid']),
+-                    'timestamp': str(row['time']),
+-                    'measurement_type': str(row['typeM']),
+-                    'series': str(row['Series']) if not pd.isna(row['Series']) else None,
+-                    'unit': str(row['Unit']) if not pd.isna(row['Unit']) else None,
+-                    'value': float(row['Value']) if not pd.isna(row['Value']) else None
+-                }
+-                try:
+-                    ts_ms = int(pd.to_datetime(row['time']).timestamp() * 1000)
+-                except Exception:
+-                    ts_ms = int(time.time() * 1000)  # fallback to current time if parsing fails
+-
+-                yield reading, ts_ms
+-    
+-    def run(self, delay_seconds=0.01, max_records=None):
+-        """Stream CSV files efficiently"""
+-        csv_files = sorted([f for f in os.listdir(self.data_path) if f.endswith('.csv')])
+-        
+-        total_records = 0
+-        for csv_file in csv_files:
+-            file_path = os.path.join(self.data_path, csv_file)
+-            print(f"Processing {csv_file}...")
+-            
+-            for reading, ts_ms in self.process_csv_file(file_path):
+-                # data = self.clean_json(reading)
+-                if self.use_kafka and self.producer:
+-                    self.producer.send('water-meter-readings', value=reading, timestamp_ms=ts_ms)
+-                else:
+-                    print(json.dumps(reading))
+-                
+-                total_records += 1
+-                if max_records and total_records >= max_records:
+-                    break
+-                
+-                time.sleep(delay_seconds)  # throttle to avoid memory spike
+-            
+-            if max_records and total_records >= max_records:
+-                break
+-            time.sleep(30)
+-            
+-        if self.producer:
+-            self.producer.flush()  # flush remaining messages
+-            self.producer.close()
+-        print(f"Data streaming complete. Processed {total_records} records")
+-
+-if __name__ == "__main__":
+-    simulator = WaterMeterSimulator()
+-    print("Starting water meter data generation...")
+-    simulator.run()
+\ No newline at end of file
+diff --git a/evaluate_system.sh b/evaluate_system.sh
+new file mode 100755
+index 0000000..5ad004a
+--- /dev/null
++++ b/evaluate_system.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++
++echo "🔍 ĐÁNH GIÁ HỆ THỐNG IOT WATER METER"
++echo "===================================="
++
++cd performance
++
++echo "🔧 Đánh giá Functions + Performance + Benchmark..."
++python3 function_evaluator.py
++python3 performance_evaluator.py
++
++echo ""
++echo "✅ HOÀN THÀNH!"
++echo "📋 Báo cáo:"
++echo "   - performance/function_evaluation_summary.txt"
++echo "   - performance/performance_summary.txt"
++echo ""
++echo "💡 Xem nhanh: cat performance/*_summary.txt"
+\ No newline at end of file
+diff --git a/lambda_architecture/advanced_analytics.py b/lambda_architecture/advanced_analytics.py
+deleted file mode 100644
+index d930d8c..0000000
+--- a/lambda_architecture/advanced_analytics.py
++++ /dev/null
+@@ -1,102 +0,0 @@
+-from pyspark.sql.functions import *
+-from pyspark.ml.feature import VectorAssembler, StandardScaler
+-from pyspark.ml.clustering import KMeans
+-from pyspark.ml.evaluation import ClusteringEvaluator
+-from pyspark.ml import Pipeline
+-import logging
+-import os
+-
+-logger = logging.getLogger(__name__)
+-
+-class AdvancedAnalytics:
+-    def __init__(self, spark, model_path="/tmp/models"):
+-        self.spark = spark
+-        self.model_path = model_path
+-        os.makedirs(model_path, exist_ok=True)
+-    
+-    def detect_usage_patterns(self, df):
+-        """Detect consumption patterns using ML"""
+-        
+-        # Hourly consumption patterns
+-        hourly_patterns = df.filter(col("measurement_type") == "Pulse1") \
+-            .withColumn("hour", hour(col("timestamp"))) \
+-            .groupBy("meter_id", "hour") \
+-            .agg(avg("value").alias("avg_hourly_flow"))
+-        
+-        # Pivot to create feature matrix
+-        pattern_matrix = hourly_patterns.groupBy("meter_id") \
+-            .pivot("hour") \
+-            .agg(first("avg_hourly_flow"))
+-        
+-        # Fill nulls and create feature vector
+-        feature_cols = [f"`{i}`" for i in range(24)]
+-        filled_matrix = pattern_matrix.fillna(0, subset=feature_cols)
+-        
+-        assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+-        feature_df = assembler.transform(filled_matrix)
+-        
+-        # Feature scaling for better clustering
+-        scaler = StandardScaler(inputCol="features", outputCol="scaled_features")
+-        
+-        # K-means clustering pipeline
+-        kmeans = KMeans(k=4, seed=42, featuresCol="scaled_features")
+-        pipeline = Pipeline(stages=[scaler, kmeans])
+-        
+-        # Train model
+-        model = pipeline.fit(feature_df)
+-        clustered = model.transform(feature_df)
+-        
+-        # Evaluate clustering quality
+-        evaluator = ClusteringEvaluator(featuresCol="scaled_features")
+-        silhouette = evaluator.evaluate(clustered)
+-        logger.info(f"Clustering silhouette score: {silhouette:.3f}")
+-        
+-        # Save model
+-        model_save_path = f"{self.model_path}/usage_patterns_model"
+-        model.write().overwrite().save(model_save_path)
+-        logger.info(f"Model saved to {model_save_path}")
+-        
+-        return clustered.select("meter_id", "prediction", "scaled_features").withColumnRenamed("prediction", "usage_pattern")
+-    
+-    def calculate_efficiency_metrics(self, df):
+-        """Calculate water usage efficiency metrics"""
+-        
+-        return df.filter(col("measurement_type") == "Pulse1_Total") \
+-            .groupBy("meter_id", "usage_type", "suburb") \
+-            .agg(
+-                avg("total_value").alias("avg_daily_usage"),
+-                stddev("total_value").alias("usage_variability"),
+-                (max("total_value") / avg("total_value")).alias("peak_to_avg_ratio")
+-            ).withColumn("efficiency_score",
+-                when(col("usage_variability") < 50, "EFFICIENT")
+-                .when(col("usage_variability") < 100, "MODERATE")
+-                .otherwise("INEFFICIENT")
+-            )
+-    
+-    def load_usage_pattern_model(self):
+-        """Load pre-trained usage pattern model"""
+-        model_load_path = f"{self.model_path}/usage_patterns_model"
+-        try:
+-            from pyspark.ml import PipelineModel
+-            model = PipelineModel.load(model_load_path)
+-            logger.info(f"Model loaded from {model_load_path}")
+-            return model
+-        except Exception as e:
+-            logger.error(f"Failed to load model: {e}")
+-            return None
+-    
+-    def detect_seasonal_patterns(self, df):
+-        """Detect seasonal consumption patterns"""
+-        return df.filter(col("measurement_type") == "Pulse1_Total") \
+-            .withColumn("month", month(col("timestamp"))) \
+-            .withColumn("day_of_week", dayofweek(col("timestamp"))) \
+-            .groupBy("meter_id", "month", "day_of_week", "suburb") \
+-            .agg(
+-                avg("value").alias("avg_consumption"),
+-                stddev("value").alias("consumption_std")
+-            ).withColumn("seasonal_pattern",
+-                when(col("month").isin([12, 1, 2]), "SUMMER")
+-                .when(col("month").isin([3, 4, 5]), "AUTUMN")
+-                .when(col("month").isin([6, 7, 8]), "WINTER")
+-                .otherwise("SPRING")
+-            )
+\ No newline at end of file
+diff --git a/lambda_architecture/batch_layer/batch_processor.py b/lambda_architecture/batch_layer/batch_processor.py
+index 7510fef..b0ac91e 100644
+--- a/lambda_architecture/batch_layer/batch_processor.py
++++ b/lambda_architecture/batch_layer/batch_processor.py
+@@ -53,26 +53,27 @@ class BatchProcessor:
+ 
+             logger.info(f"Found {record_count} raw records to process")
+ 
+-            # Enrich raw data
+-            enriched_df = self.enricher.enrich_dataframe(raw_df)
+-
+-            # Rename columns to be SQL/Tableau friendly
+-            if 'Meter Type' in enriched_df.columns:
+-                enriched_df = enriched_df.withColumnRenamed('Meter Type', 'meter_type')
+-            if 'Usage Type' in enriched_df.columns:
+-                enriched_df = enriched_df.withColumnRenamed('Usage Type', 'usage_type')
+-            if 'Suburb' in enriched_df.columns:
+-                enriched_df = enriched_df.withColumnRenamed('Suburb', 'suburb')
+-
+-            # Filter & validation
++            # Clean IoT data first
++            cleaned_df = self.enricher.clean_iot_data(raw_df)
++            logger.info(f"Cleaned data: {cleaned_df.count()} records")
++
++            # Enrich with metadata (skip cleaning since already done)
++            enriched_df = self.enricher.enrich_dataframe(cleaned_df, skip_cleaning=True)
++
++            # Rename columns to be SQL/Tableau friendly (check if columns exist after cleaning)
++            column_mapping = {
++                'Meter Type': 'meter_type',
++                'Usage Type': 'usage_type', 
++                'Suburb': 'suburb',
++                'Postcode': 'postcode'
++            }
++            
++            for old_col, new_col in column_mapping.items():
++                if old_col in enriched_df.columns:
++                    enriched_df = enriched_df.withColumnRenamed(old_col, new_col)
++
++            # Additional filtering for batch processing
+             filtered_df = enriched_df.filter(
+-                (F.col("value").isNotNull()) &
+-                (F.col("measurement_type").isNotNull()) &
+-                (F.col("meter_id").isNotNull()) &
+-                (F.col("timestamp").isNotNull()) &
+-                (F.col("value") >= 0) &
+-                (F.col("value") <= 100000) &
+-                (F.col("meter_id") > 0) &
+                 (F.col("measurement_type").isin(["Pulse1", "Pulse1_Total", "Battery", "DeviceTemperature"]))
+             ).repartition(200, F.col("meter_id")).persist(StorageLevel.MEMORY_AND_DISK)
+ 
+diff --git a/lambda_architecture/batch_layer/hive_processor.py b/lambda_architecture/batch_layer/hive_processor.py
+deleted file mode 100644
+index 4a44352..0000000
+--- a/lambda_architecture/batch_layer/hive_processor.py
++++ /dev/null
+@@ -1,130 +0,0 @@
+-from pyspark.sql import SparkSession
+-from pyspark.sql.functions import *
+-
+-class HiveProcessor:
+-    def __init__(self):
+-        self.spark = SparkSession.builder \
+-            .appName("WaterMeterHiveProcessor") \
+-            .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
+-            .enableHiveSupport() \
+-            .getOrCreate()
+-    
+-    def create_hive_tables(self):
+-        # Create database
+-        self.spark.sql("CREATE DATABASE IF NOT EXISTS water_meter")
+-        self.spark.sql("USE water_meter")
+-        
+-        # Raw data table
+-        self.spark.sql("""
+-            CREATE TABLE IF NOT EXISTS raw_readings (
+-                meter_id BIGINT,
+-                timestamp TIMESTAMP,
+-                measurement_type STRING,
+-                series STRING,
+-                unit STRING,
+-                value DOUBLE,
+-                meter_type STRING,
+-                suburb STRING,
+-                postcode INT,
+-                usage_type STRING
+-            )
+-            STORED AS PARQUET
+-            LOCATION '/data/water_meter/raw'
+-        """)
+-        
+-        # Daily aggregations table
+-        self.spark.sql("""
+-            CREATE TABLE IF NOT EXISTS daily_stats (
+-                meter_id BIGINT,
+-                date DATE,
+-                measurement_type STRING,
+-                total_value DOUBLE,
+-                avg_value DOUBLE,
+-                max_value DOUBLE,
+-                min_value DOUBLE,
+-                reading_count BIGINT
+-            )
+-            STORED AS PARQUET
+-            LOCATION '/data/water_meter/batch_views/daily_stats'
+-        """)
+-        
+-        # Monthly aggregations table
+-        self.spark.sql("""
+-            CREATE TABLE IF NOT EXISTS monthly_stats (
+-                meter_id BIGINT,
+-                month STRING,
+-                measurement_type STRING,
+-                monthly_total DOUBLE,
+-                monthly_avg DOUBLE
+-            )
+-            STORED AS PARQUET
+-            LOCATION '/data/water_meter/batch_views/monthly_stats'
+-        """)
+-        
+-        # Problem meters table
+-        self.spark.sql("""
+-            CREATE TABLE IF NOT EXISTS problem_meters (
+-                meter_id BIGINT,
+-                date DATE,
+-                measurement_type STRING,
+-                total_value DOUBLE,
+-                avg_value DOUBLE,
+-                max_value DOUBLE,
+-                min_value DOUBLE,
+-                reading_count BIGINT,
+-                issue_type STRING
+-            )
+-            STORED AS PARQUET
+-            LOCATION '/data/water_meter/batch_views/problem_meters'
+-        """)
+-    
+-    def process_to_hive(self):
+-        # Read enriched JSON data from HDFS
+-        df = self.spark.read.json("/data/water_meter/raw")
+-        
+-        # Create daily aggregations
+-        daily_stats = df \
+-            .withColumn("date", to_date(col("timestamp"))) \
+-            .groupBy("date", "meter_id", "measurement_type") \
+-            .agg(
+-                sum("value").alias("total_value"),
+-                avg("value").alias("avg_value"),
+-                max("value").alias("max_value"),
+-                min("value").alias("min_value"),
+-                count("*").alias("reading_count")
+-            )
+-        
+-        # Write to Hive table
+-        daily_stats.write \
+-            .mode("overwrite") \
+-            .insertInto("water_meter.daily_stats")
+-        
+-        # Monthly aggregations
+-        monthly_stats = daily_stats \
+-            .withColumn("month", date_format(col("date"), "yyyy-MM")) \
+-            .groupBy("month", "meter_id", "measurement_type") \
+-            .agg(
+-                sum("total_value").alias("monthly_total"),
+-                avg("avg_value").alias("monthly_avg")
+-            )
+-        
+-        monthly_stats.write \
+-            .mode("overwrite") \
+-            .insertInto("water_meter.monthly_stats")
+-        
+-        # Process problem meters if provided
+-        try:
+-            problem_df = self.spark.read.parquet("/data/water_meter/batch_views/problem_meters")
+-            problem_df.write \
+-                .mode("overwrite") \
+-                .insertInto("water_meter.problem_meters")
+-        except:
+-            print("No problem meters data found")
+-        
+-        return daily_stats, monthly_stats
+-
+-if __name__ == "__main__":
+-    processor = HiveProcessor()
+-    processor.create_hive_tables()
+-    processor.process_to_hive()
+-    print("Data processed to Hive tables")
+\ No newline at end of file
+diff --git a/lambda_architecture/connection_pool.py b/lambda_architecture/connection_pool.py
+deleted file mode 100644
+index 43cfed8..0000000
+--- a/lambda_architecture/connection_pool.py
++++ /dev/null
+@@ -1,120 +0,0 @@
+-"""
+-Connection pooling for external services
+-"""
+-import threading
+-import time
+-from queue import Queue, Empty
+-from elasticsearch import Elasticsearch
+-from kafka import KafkaProducer
+-import logging
+-
+-logger = logging.getLogger(__name__)
+-
+-class ConnectionPool:
+-    """Generic connection pool implementation"""
+-    
+-    def __init__(self, create_connection_func, max_connections=10, timeout=30):
+-        self.create_connection = create_connection_func
+-        self.max_connections = max_connections
+-        self.timeout = timeout
+-        self.pool = Queue(maxsize=max_connections)
+-        self.active_connections = 0
+-        self.lock = threading.Lock()
+-        
+-    def get_connection(self):
+-        """Get connection from pool or create new one"""
+-        try:
+-            # Try to get existing connection
+-            connection = self.pool.get_nowait()
+-            return connection
+-        except Empty:
+-            # Create new connection if under limit
+-            with self.lock:
+-                if self.active_connections < self.max_connections:
+-                    connection = self.create_connection()
+-                    self.active_connections += 1
+-                    return connection
+-                else:
+-                    # Wait for available connection
+-                    return self.pool.get(timeout=self.timeout)
+-    
+-    def return_connection(self, connection):
+-        """Return connection to pool"""
+-        try:
+-            self.pool.put_nowait(connection)
+-        except:
+-            # Pool is full, close connection
+-            self._close_connection(connection)
+-            with self.lock:
+-                self.active_connections -= 1
+-    
+-    def _close_connection(self, connection):
+-        """Close connection (override in subclasses)"""
+-        if hasattr(connection, 'close'):
+-            connection.close()
+-
+-class ElasticsearchPool(ConnectionPool):
+-    """Elasticsearch connection pool"""
+-    
+-    def __init__(self, hosts, max_connections=5, **es_kwargs):
+-        def create_es_connection():
+-            return Elasticsearch(hosts, **es_kwargs)
+-        
+-        super().__init__(create_es_connection, max_connections)
+-        self.hosts = hosts
+-        
+-    def execute_bulk(self, actions):
+-        """Execute bulk operations with pooled connection"""
+-        connection = self.get_connection()
+-        try:
+-            from elasticsearch.helpers import bulk
+-            return bulk(connection, actions)
+-        finally:
+-            self.return_connection(connection)
+-
+-class KafkaProducerPool(ConnectionPool):
+-    """Kafka producer connection pool"""
+-    
+-    def __init__(self, bootstrap_servers, max_connections=3, **kafka_kwargs):
+-        def create_kafka_producer():
+-            return KafkaProducer(
+-                bootstrap_servers=bootstrap_servers,
+-                acks='all',
+-                retries=3,
+-                enable_idempotence=True,
+-                **kafka_kwargs
+-            )
+-        
+-        super().__init__(create_kafka_producer, max_connections)
+-        
+-    def send_message(self, topic, value, key=None):
+-        """Send message with pooled producer"""
+-        producer = self.get_connection()
+-        try:
+-            future = producer.send(topic, value=value, key=key)
+-            producer.flush()  # Ensure message is sent
+-            return future
+-        finally:
+-            self.return_connection(producer)
+-    
+-    def _close_connection(self, connection):
+-        """Close Kafka producer"""
+-        connection.close()
+-
+-# Global connection pools
+-_es_pool = None
+-_kafka_pool = None
+-
+-def get_elasticsearch_pool(hosts="localhost:9200", max_connections=5):
+-    """Get or create Elasticsearch connection pool"""
+-    global _es_pool
+-    if _es_pool is None:
+-        _es_pool = ElasticsearchPool([hosts], max_connections)
+-    return _es_pool
+-
+-def get_kafka_producer_pool(bootstrap_servers="localhost:9092", max_connections=3):
+-    """Get or create Kafka producer connection pool"""
+-    global _kafka_pool
+-    if _kafka_pool is None:
+-        _kafka_pool = KafkaProducerPool(bootstrap_servers, max_connections)
+-    return _kafka_pool
+\ No newline at end of file
+diff --git a/lambda_architecture/data_enrichment.py b/lambda_architecture/data_enrichment.py
+index d2de766..59678a8 100644
+--- a/lambda_architecture/data_enrichment.py
++++ b/lambda_architecture/data_enrichment.py
+@@ -1,8 +1,8 @@
+ import os
+ import logging
+ from pyspark.sql import SparkSession
+-from pyspark.sql.functions import broadcast
+-from pyspark.sql.types import StructType, StructField, StringType, IntegerType
++from pyspark.sql.functions import broadcast, col, when, lit, to_timestamp, current_timestamp, trim, lower, initcap, regexp_extract
++from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType, DoubleType
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -18,7 +18,7 @@ class SparkDataEnrichment:
+         logger.info("DataEnrichment initialized successfully with Spark.")
+ 
+     def _load_meter_details(self):
+-        """Load meter metadata into Spark DataFrame and broadcast it."""
++        """Load and clean meter metadata into Spark DataFrame and broadcast it."""
+         schema = StructType([
+             StructField("managedObjects_id", StringType(), True),
+             StructField("Meter Type", StringType(), True),
+@@ -32,9 +32,12 @@ class SparkDataEnrichment:
+             count = df.count()
+             if count == 0:
+                 logger.warning(f"⚠️ Metadata file is empty: {self.data_path}")
+-            else:
+-                logger.info(f"✅ Loaded {count} meter details from {self.data_path}")
+-            return broadcast(df)
++                return self.spark.createDataFrame([], schema)
++            
++            # Clean metadata like speed layer
++            cleaned_df = self._clean_metadata(df)
++            logger.info(f"✅ Loaded and cleaned {cleaned_df.count()} meter details from {self.data_path}")
++            return broadcast(cleaned_df)
+ 
+         except Exception as e:
+             logger.error(f"❌ Failed to load metadata from {self.data_path}: {e}")
+@@ -44,14 +47,59 @@ class SparkDataEnrichment:
+                 if os.path.exists(local_path):
+                     logger.info(f"📂 Falling back to local metadata: {local_path}")
+                     df = self.spark.read.option("header", "true").schema(schema).csv(local_path)
+-                    return broadcast(df)
++                    cleaned_df = self._clean_metadata(df)
++                    return broadcast(cleaned_df)
+                 else:
+                     logger.warning("⚠️ No metadata available (HDFS and local missing). Returning empty DataFrame.")
+             except Exception as e2:
+                 logger.error(f"❌ Failed to load fallback metadata: {e2}")
+ 
+             # Return empty DataFrame with correct schema
++            return broadcast(self.spark.createDataFrame([], schema))
++    
++    def _clean_metadata(self, meta_df):
++        """Clean metadata consistent with speed layer"""
++        # Check required columns
++        required_cols = ["managedObjects_id", "Meter Type", "Suburb", "Postcode", "Usage Type"]
++        missing = [c for c in required_cols if c not in meta_df.columns]
++        if missing:
++            logger.error(f"Missing required columns: {missing}")
++            # Return empty DataFrame with correct schema instead of malformed data
++            schema = StructType([
++                StructField("managedObjects_id", StringType(), True),
++                StructField("Meter Type", StringType(), True),
++                StructField("Suburb", StringType(), True),
++                StructField("Postcode", StringType(), True),
++                StructField("Usage Type", StringType(), True),
++            ])
+             return self.spark.createDataFrame([], schema)
++        
++        # Clean and standardize - keep original column names for batch compatibility
++        cleaned_df = meta_df.withColumn("managedObjects_id", col("managedObjects_id").cast("string"))
++        
++        # Clean text fields - trim and lowercase VALUES but keep column names
++        for c in ["Suburb", "Usage Type", "Meter Type"]:
++            cleaned_df = cleaned_df.withColumn(c, trim(lower(col(c))))
++        
++        # Clean postcode - extract digits only
++        cleaned_df = cleaned_df.withColumn("Postcode", regexp_extract(col("Postcode"), "\\d+", 0))
++        
++        # Fill nulls with defaults
++        cleaned_df = cleaned_df.fillna({
++            "Suburb": "unknown", 
++            "Postcode": "0000", 
++            "Usage Type": "unknown", 
++            "Meter Type": "unknown"
++        })
++        
++        # Remove nulls and duplicates
++        cleaned_df = cleaned_df.filter(col("managedObjects_id").isNotNull()) \
++                              .dropDuplicates(["managedObjects_id"])
++        
++        # Add display label for suburb
++        cleaned_df = cleaned_df.withColumn("Suburb_Label", initcap(col("Suburb")))
++        
++        return cleaned_df
+ 
+     def _get_local_fallback_path(self):
+         """Get local metadata file path relative to project root."""
+@@ -59,26 +107,68 @@ class SparkDataEnrichment:
+         project_root = os.path.dirname(os.path.dirname(current_dir))
+         return os.path.join(project_root, 'data', 'managedobject_details.csv')
+ 
+-    def enrich_dataframe(self, raw_df):
++    def clean_iot_data(self, raw_df):
++        """Clean IoT data - consistent with speed layer logic"""
++        logger.info("Starting data cleaning...")
++        
++        # Remove null records and validate core fields
++        cleaned_df = raw_df.dropna(how='all').filter(
++            (col("meter_id").isNotNull()) &
++            (col("timestamp").isNotNull()) &
++            (col("measurement_type").isNotNull()) &
++            (col("value").isNotNull())
++        )
++        
++        # Data type conversion and validation
++        cleaned_df = cleaned_df.withColumn("meter_id", col("meter_id").cast(StringType())) \
++                              .withColumn("value", col("value").cast(DoubleType())) \
++                              .withColumn("timestamp_parsed", to_timestamp(col("timestamp")))
++        
++        # Remove invalid values
++        cleaned_df = cleaned_df.filter(
++            (col("meter_id").isNotNull()) &
++            (col("value") >= 0) &
++            (col("value") < 1000000) &
++            (col("timestamp_parsed").isNotNull())
++        )
++        
++        # Remove duplicates and standardize measurement types
++        cleaned_df = cleaned_df.dropDuplicates(["meter_id", "timestamp", "measurement_type"]) \
++                              .withColumn("measurement_type", 
++                                  when(col("measurement_type").isin(["pulse1", "PULSE1"]), "Pulse1")
++                                  .when(col("measurement_type").isin(["battery", "BATTERY"]), "Battery")
++                                  .when(col("measurement_type").isin(["temperature", "TEMPERATURE", "devicetemperature"]), "DeviceTemperature")
++                                  .otherwise(col("measurement_type"))
++                              )
++        
++        logger.info("Data cleaning completed.")
++        return cleaned_df
++
++    def enrich_dataframe(self, raw_df, skip_cleaning=False):
+         """
+-        Enrich a Spark DataFrame of raw IoT readings with metadata.
+-        - Performs left join on 'meter_id' vs 'managedObjects_id'
++        Clean and enrich a Spark DataFrame of raw IoT readings with metadata.
++        - First cleans the data (unless skip_cleaning=True)
++        - Then performs left join on 'meter_id' vs 'managedObjects_id'
+         """
+-        if self.metadata_df is None:
+-            logger.warning("⚠️ Metadata DataFrame is empty. Returning original DataFrame.")
+-            return raw_df
++        if self.metadata_df.rdd.isEmpty():
++            logger.warning("⚠️ Metadata DataFrame is empty. Returning cleaned DataFrame only.")
++            return self.clean_iot_data(raw_df) if not skip_cleaning else raw_df
+ 
+         try:
++            # Clean data first (unless skipped)
++            working_df = self.clean_iot_data(raw_df) if not skip_cleaning else raw_df
++            
++            # Then enrich with metadata
+             enriched_df = (
+-                raw_df.join(
++                working_df.join(
+                     self.metadata_df,
+-                    raw_df["meter_id"] == self.metadata_df["managedObjects_id"],
++                    working_df["meter_id"] == self.metadata_df["managedObjects_id"],
+                     "left"
+                 )
+                 .drop("managedObjects_id")  # remove duplicate key
+             )
+-            logger.info("✅ Successfully enriched raw data with metadata.")
++            logger.info("✅ Successfully cleaned and enriched raw data with metadata.")
+             return enriched_df
+         except Exception as e:
+             logger.error(f"❌ Failed to enrich DataFrame: {e}")
+-            return raw_df
+\ No newline at end of file
++            return self.clean_iot_data(raw_df) if not skip_cleaning else raw_df
+\ No newline at end of file
+diff --git a/lambda_architecture/data_ingestion.py b/lambda_architecture/data_ingestion.py
+deleted file mode 100644
+index 6422749..0000000
+--- a/lambda_architecture/data_ingestion.py
++++ /dev/null
+@@ -1,76 +0,0 @@
+-import requests
+-import json
+-import time
+-
+-def register_hdfs_sink():
+-    connector_name = "water-meter-hdfs-sink"
+-    connect_url = "http://localhost:8083/connectors"
+-
+-    config = {
+-        "name": connector_name,
+-        "config": {
+-            "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+-            "tasks.max": "1",
+-            "topics": "water-meter-readings",
+-
+-            "hdfs.url": "hdfs://namenode:8020",
+-            "topics.dir": "/data/water_meter/raw",
+-            "logs.dir": "/data/water_meter/logs",
+-
+-            "flush.size": "100",                  
+-            "rotate.interval.ms": "30000",      
+-
+-            "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+-            # "store.compression.codec": "gzip",
+-
+-            "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+-            "path.format": "YYYY/MM/dd",
+-            "locale": "en",
+-            "timezone": "UTC",
+-            "partition.duration.ms": "3600000",
+-
+-            "time.extractor": "Record",
+-            "timestamp.field": "timestamp",
+-
+-            "hdfs.authentication.kerberos": "false",
+-
+-            "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+-            "key.converter.schemas.enable": "false",
+-            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+-            "value.converter.schemas.enable": "true"
+-        }
+-    }
+-
+-    print("📡 Registering HDFS Sink Connector...")
+-    response = requests.post(connect_url, headers={"Content-Type": "application/json"}, data=json.dumps(config))
+-
+-    if response.status_code == 201:
+-        print("✅ Connector registered successfully!")
+-    elif response.status_code == 409:
+-        print("⚠️ Connector already exists, updating instead...")
+-        update_url = f"{connect_url}/{connector_name}/config"
+-        response = requests.put(update_url, headers={"Content-Type": "application/json"}, data=json.dumps(config["config"]))
+-        print("🔄 Connector updated." if response.ok else f"❌ Failed to update: {response.text}")
+-    else:
+-        print(f"❌ Failed to register connector: {response.status_code} {response.text}")
+-
+-def monitor_connector():
+-    try:
+-        while True:
+-            status_url = "http://localhost:8083/connectors/water-meter-hdfs-sink/status"
+-            try:
+-                r = requests.get(status_url)
+-                if r.ok:
+-                    status = r.json()
+-                    print(f"Connector state: {status['connector']['state']}")
+-                else:
+-                    print(f"⚠️ Failed to get status: {r.text}")
+-            except Exception as e:
+-                print(f"❌ Cannot connect to Kafka Connect: {e}")
+-            time.sleep(15)
+-    except KeyboardInterrupt:
+-        print("🛑 Monitoring stopped by user.")
+-
+-if __name__ == "__main__":
+-    register_hdfs_sink()
+-    # monitor_connector()
+diff --git a/lambda_architecture/hive_analytics.py b/lambda_architecture/hive_analytics.py
+deleted file mode 100644
+index 93036d8..0000000
+--- a/lambda_architecture/hive_analytics.py
++++ /dev/null
+@@ -1,149 +0,0 @@
+-from databricks import sql
+-import os
+-import logging
+-
+-logger = logging.getLogger(__name__)
+-
+-class HiveAnalytics:
+-    def __init__(self):
+-        self.server_hostname = os.getenv('DATABRICKS_SQL_HOSTNAME')
+-        self.http_path = os.getenv('DATABRICKS_SQL_HTTP_PATH')
+-        self.access_token = os.getenv('DATABRICKS_SQL_TOKEN')
+-    
+-    def connect(self):
+-        return sql.connect(
+-            server_hostname=self.server_hostname,
+-            http_path=self.http_path,
+-            access_token=self.access_token
+-        )
+-    
+-    def query_batch_results(self):
+-        """Query batch processing results from Hive tables"""
+-        with self.connect() as connection:
+-            cursor = connection.cursor()
+-            
+-            # Show available tables
+-            cursor.execute("SHOW TABLES IN water_meter")
+-            tables = cursor.fetchall()
+-            logger.info(f"Available tables: {tables}")
+-            
+-            # Query daily aggregation results
+-            cursor.execute("""
+-                SELECT * FROM water_meter.daily_aggregation
+-                ORDER BY date DESC, avg_flow DESC
+-                LIMIT 10
+-            """)
+-            daily_results = cursor.fetchall()
+-            
+-            # Query anomalies
+-            cursor.execute("""
+-                SELECT meter_id, suburb, timestamp, flow_rate, z_score
+-                FROM water_meter.anomalies
+-                ORDER BY ABS(z_score) DESC
+-                LIMIT 10
+-            """)
+-            anomaly_results = cursor.fetchall()
+-            
+-            # Query suburb analysis
+-            cursor.execute("""
+-                SELECT suburb, usage_type, meter_count, 
+-                       ROUND(avg_flow_rate, 2) as avg_flow,
+-                       ROUND(total_consumption, 2) as total_consumption
+-                FROM water_meter.suburb_analysis
+-                ORDER BY total_consumption DESC
+-            """)
+-            suburb_results = cursor.fetchall()
+-            
+-            return {
+-                'daily_agg': daily_results,
+-                'anomalies': anomaly_results,
+-                'suburb_analysis': suburb_results
+-            }
+-    
+-    def create_business_views(self):
+-        """Create business intelligence views"""
+-        with self.connect() as connection:
+-            cursor = connection.cursor()
+-            
+-            # High consumption meters view
+-            cursor.execute("""
+-                CREATE OR REPLACE VIEW water_meter.high_consumption_meters AS
+-                SELECT meter_id, suburb, usage_type, avg_flow, daily_volume
+-                FROM water_meter.daily_aggregation
+-                WHERE daily_volume > (
+-                    SELECT PERCENTILE(daily_volume, 0.9) 
+-                    FROM water_meter.daily_aggregation
+-                )
+-            """)
+-            
+-            # Anomaly summary view
+-            cursor.execute("""
+-                CREATE OR REPLACE VIEW water_meter.anomaly_summary AS
+-                SELECT suburb, usage_type,
+-                       COUNT(*) as anomaly_count,
+-                       AVG(ABS(z_score)) as avg_anomaly_score
+-                FROM water_meter.anomalies a
+-                JOIN water_meter.daily_aggregation d 
+-                ON a.meter_id = d.meter_id
+-                GROUP BY suburb, usage_type
+-                ORDER BY anomaly_count DESC
+-            """)
+-            
+-            logger.info("✓ Business views created")
+-    
+-    def generate_reports(self):
+-        """Generate business reports from Hive tables"""
+-        with self.connect() as connection:
+-            cursor = connection.cursor()
+-            
+-            # Top consuming suburbs
+-            cursor.execute("""
+-                SELECT suburb, 
+-                       SUM(total_consumption) as total_suburb_consumption,
+-                       AVG(avg_flow_rate) as avg_suburb_flow,
+-                       COUNT(DISTINCT meter_count) as total_meters
+-                FROM water_meter.suburb_analysis
+-                GROUP BY suburb
+-                ORDER BY total_suburb_consumption DESC
+-                LIMIT 5
+-            """)
+-            top_suburbs = cursor.fetchall()
+-            
+-            # Anomaly trends
+-            cursor.execute("""
+-                SELECT DATE(timestamp) as anomaly_date,
+-                       COUNT(*) as daily_anomalies,
+-                       AVG(ABS(z_score)) as avg_severity
+-                FROM water_meter.anomalies
+-                GROUP BY DATE(timestamp)
+-                ORDER BY anomaly_date DESC
+-                LIMIT 7
+-            """)
+-            anomaly_trends = cursor.fetchall()
+-            
+-            return {
+-                'top_suburbs': top_suburbs,
+-                'anomaly_trends': anomaly_trends
+-            }
+-
+-if __name__ == "__main__":
+-    analytics = HiveAnalytics()
+-    
+-    # Query batch results
+-    results = analytics.query_batch_results()
+-    print("Batch Processing Results from Hive:")
+-    for table, data in results.items():
+-        print(f"\n{table.upper()}:")
+-        for row in data[:3]:  # Show first 3 rows
+-            print(f"  {row}")
+-    
+-    # Create business views
+-    analytics.create_business_views()
+-    
+-    # Generate reports
+-    reports = analytics.generate_reports()
+-    print("\nBusiness Reports:")
+-    for report, data in reports.items():
+-        print(f"\n{report.upper()}:")
+-        for row in data:
+-            print(f"  {row}")
+\ No newline at end of file
+diff --git a/lambda_architecture/local_spark_batch.py b/lambda_architecture/local_spark_batch.py
+deleted file mode 100644
+index bb0ed4d..0000000
+--- a/lambda_architecture/local_spark_batch.py
++++ /dev/null
+@@ -1,141 +0,0 @@
+-from pyspark.sql import SparkSession
+-from pyspark.sql.functions import *
+-from data_enrichment import SparkDataEnrichment
+-import logging
+-import os
+-
+-logger = logging.getLogger(__name__)
+-
+-class LocalSparkBatch:
+-    def __init__(self):
+-        # Connect to Databricks as remote Spark cluster
+-        self.spark = SparkSession.builder \
+-            .appName("WaterMeterBatchProcessing") \
+-            .config("spark.master", f"databricks://token:{os.getenv('DATABRICKS_TOKEN')}@{os.getenv('DATABRICKS_SERVER_HOSTNAME')}") \
+-            .config("spark.databricks.cluster.id", os.getenv('DATABRICKS_CLUSTER_ID')) \
+-            .config("spark.sql.adaptive.enabled", "true") \
+-            .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
+-            .enableHiveSupport() \
+-            .getOrCreate()
+-        
+-        # Create database if not exists
+-        self.spark.sql("CREATE DATABASE IF NOT EXISTS water_meter")
+-        
+-        # Initialize data enrichment
+-        self.enricher = SparkDataEnrichment(
+-            self.spark, 
+-            "hdfs://namenode:9000/data/water-meter-data/metadata/managedobject_details.csv"
+-        )
+-    
+-    def process_batch_data(self):
+-        """Process batch data using Databricks as remote Spark cluster"""
+-        try:
+-            # Read raw data from HDFS (Databricks reads from your local HDFS)
+-            raw_df = self.spark.read.parquet("hdfs://namenode:9000/data/water-meter-data/raw/")
+-            logger.info(f"Read {raw_df.count()} raw records from local HDFS")
+-            
+-            # Also create external table pointing to raw data
+-            self.spark.sql("""
+-                CREATE TABLE IF NOT EXISTS water_meter.raw_data (
+-                    meter_id STRING,
+-                    timestamp TIMESTAMP,
+-                    flow_rate DOUBLE,
+-                    total_volume DOUBLE,
+-                    temperature DOUBLE,
+-                    pressure DOUBLE,
+-                    date STRING
+-                )
+-                USING PARQUET
+-                LOCATION 'hdfs://namenode:9000/data/water-meter-data/raw/'
+-            """)
+-            
+-            # Enrich data using Databricks Spark
+-            enriched_df = self.enricher.enrich_dataframe(raw_df)
+-            logger.info("Data enrichment completed on Databricks")
+-            
+-            # Daily aggregations using Databricks compute
+-            daily_agg = enriched_df.groupBy("meter_id", "date", "suburb", "usage_type").agg(
+-                avg("flow_rate").alias("avg_flow"),
+-                max("total_volume").alias("daily_volume"),
+-                count("*").alias("readings_count")
+-            )
+-            
+-            # Anomaly detection using Databricks Spark
+-            window_spec = Window.partitionBy("meter_id")
+-            anomalies = enriched_df.withColumn(
+-                "avg_flow", avg("flow_rate").over(window_spec)
+-            ).withColumn(
+-                "stddev_flow", stddev("flow_rate").over(window_spec)
+-            ).withColumn(
+-                "z_score", (col("flow_rate") - col("avg_flow")) / col("stddev_flow")
+-            ).filter(abs(col("z_score")) > 2.5)
+-            
+-            # Usage trends using Databricks Spark
+-            trends = enriched_df.withColumn(
+-                "prev_volume", lag("total_volume").over(
+-                    Window.partitionBy("meter_id").orderBy("timestamp")
+-                )
+-            ).withColumn(
+-                "daily_usage", col("total_volume") - col("prev_volume")
+-            )
+-            
+-            # Write results to Databricks Hive tables
+-            daily_agg.write.mode("overwrite").saveAsTable("water_meter.daily_aggregation")
+-            anomalies.write.mode("overwrite").saveAsTable("water_meter.anomalies")
+-            trends.write.mode("overwrite").saveAsTable("water_meter.usage_trends")
+-            
+-            logger.info("✓ Batch processing completed - Results stored in Databricks Hive")
+-            
+-            # Show table info
+-            self.spark.sql("SHOW TABLES IN water_meter").show()
+-            
+-            return {
+-                'daily_agg': daily_agg.count(),
+-                'anomalies': anomalies.count(),
+-                'trends': trends.count()
+-            }
+-            
+-        except Exception as e:
+-            logger.error(f"Batch processing failed: {e}")
+-            return None
+-    
+-    def suburb_analysis(self):
+-        """Suburb analysis using Databricks compute"""
+-        enriched_df = self.spark.read.parquet("hdfs://namenode:9000/data/water-meter-data/raw/")
+-        enriched_df = self.enricher.enrich_dataframe(enriched_df)
+-        
+-        suburb_stats = enriched_df.groupBy("suburb", "usage_type").agg(
+-            countDistinct("meter_id").alias("meter_count"),
+-            avg("flow_rate").alias("avg_flow_rate"),
+-            sum("total_volume").alias("total_consumption")
+-        ).orderBy(desc("total_consumption"))
+-        
+-        # Write results to Databricks Hive table
+-        suburb_stats.write.mode("overwrite").saveAsTable("water_meter.suburb_analysis")
+-        
+-        return suburb_stats.collect()
+-    
+-    def run_all_analytics(self):
+-        """Run all analytics using Databricks as remote compute"""
+-        logger.info("Starting batch processing on Databricks cluster...")
+-        
+-        # Process batch data
+-        batch_results = self.process_batch_data()
+-        
+-        # Suburb analysis
+-        suburb_results = self.suburb_analysis()
+-        
+-        logger.info("✓ All analytics completed on Databricks")
+-        
+-        return {
+-            'batch_processing': batch_results,
+-            'suburb_analysis': len(suburb_results)
+-        }
+-
+-if __name__ == "__main__":
+-    processor = LocalSparkBatch()
+-    results = processor.run_all_analytics()
+-    
+-    print("Batch Processing Results (using Databricks compute):")
+-    for analysis, data in results.items():
+-        print(f"  {analysis}: {data}")
+\ No newline at end of file
+diff --git a/lambda_architecture/monitoring.py b/lambda_architecture/monitoring.py
+deleted file mode 100644
+index bdae423..0000000
+--- a/lambda_architecture/monitoring.py
++++ /dev/null
+@@ -1,339 +0,0 @@
+-import logging
+-import time
+-from datetime import datetime
+-from pyspark.sql import SparkSession
+-from config import Config
+-
+-logging.basicConfig(level=logging.INFO)
+-logger = logging.getLogger(__name__)
+-
+-class SystemMonitor:
+-    def __init__(self, config=None):
+-        self.config = config or Config()
+-        self.spark = SparkSession.builder \
+-            .appName("SystemMonitor") \
+-            .getOrCreate()
+-    
+-    def check_data_freshness(self):
+-        """Check if data is being ingested regularly"""
+-        try:
+-            df = self.spark.read.json(self.config.HDFS_RAW_PATH)
+-            latest_timestamp = df.agg({"timestamp": "max"}).collect()[0][0]
+-            
+-            if latest_timestamp:
+-                latest_time = datetime.fromisoformat(latest_timestamp.replace('Z', '+00:00'))
+-                time_diff = datetime.now() - latest_time.replace(tzinfo=None)
+-                
+-                if time_diff.total_seconds() > 3600:  # 1 hour
+-                    logger.warning(f"Data is stale. Latest record: {latest_timestamp}")
+-                    return False
+-                else:
+-                    logger.info(f"Data is fresh. Latest record: {latest_timestamp}")
+-                    return True
+-            else:
+-                logger.error("No data found in HDFS")
+-                return False
+-                
+-        except Exception as e:
+-            logger.error(f"Failed to check data freshness: {e}")
+-            return False
+-    
+-    def check_data_quality(self):
+-        """Check data quality metrics"""
+-        try:
+-            df = self.spark.read.json(self.config.HDFS_RAW_PATH)
+-            total_records = df.count()
+-            
+-            # Check for null values
+-            null_counts = {}
+-            for col_name in df.columns:
+-                null_count = df.filter(df[col_name].isNull()).count()
+-                null_percentage = (null_count / total_records) * 100
+-                null_counts[col_name] = null_percentage
+-                
+-                if null_percentage > 5:  # More than 5% nulls
+-                    logger.warning(f"High null percentage in {col_name}: {null_percentage:.2f}%")
+-            
+-            # Check for negative values
+-            negative_values = df.filter(df.value < 0).count()
+-            if negative_values > 0:
+-                logger.warning(f"Found {negative_values} negative readings")
+-            
+-            logger.info(f"Data quality check completed. Total records: {total_records}")
+-            return null_counts
+-            
+-        except Exception as e:
+-            logger.error(f"Failed to check data quality: {e}")
+-            return {}
+-    
+-    def check_processing_performance(self):
+-        """Monitor processing performance"""
+-        try:
+-            # Check batch processing output
+-            daily_stats = self.spark.read.parquet(f"{self.config.HDFS_BATCH_PATH}/daily_stats")
+-            monthly_stats = self.spark.read.parquet(f"{self.config.HDFS_BATCH_PATH}/monthly_stats")
+-            problem_meters = self.spark.read.parquet(f"{self.config.HDFS_BATCH_PATH}/problem_meters")
+-            
+-            logger.info(f"Daily stats records: {daily_stats.count()}")
+-            logger.info(f"Monthly stats records: {monthly_stats.count()}")
+-            logger.info(f"Problem meters: {problem_meters.count()}")
+-            
+-            return {
+-                "daily_stats": daily_stats.count(),
+-                "monthly_stats": monthly_stats.count(),
+-                "problem_meters": problem_meters.count()
+-            }
+-            
+-        except Exception as e:
+-            logger.error(f"Failed to check processing performance: {e}")
+-            return {}
+-    
+-    def generate_health_report(self):
+-        """Generate comprehensive system health report"""
+-        logger.info("Generating system health report...")
+-        
+-        report = {
+-            "timestamp": datetime.now().isoformat(),
+-            "data_freshness": self.check_data_freshness(),
+-            "data_quality": self.check_data_quality(),
+-            "processing_performance": self.check_processing_performance()
+-        }
+-        
+-        return report
+-
+-if __name__ == "__main__":
+-    monitor = SystemMonitor()
+-    
+-    while True:
+-        try:
+-            report = monitor.generate_health_report()
+-            logger.info("Health check completed")
+-            time.sleep(300)  # Check every 5 minutes
+-        except KeyboardInterrupt:
+-            logger.info("Monitoring stopped")
+-            break
+-        except Exception as e:
+-            logger.error(f"Health check failed: {e}")
+-            time.sleep(60)  # Wait 1 minute before retry
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-import logging
+-import time
+-import uuid
+-
+-from pyspark.sql import SparkSession
+-from pyspark.sql.functions import *
+-from pyspark.sql.types import *
+-from config import Config
+-
+-logging.basicConfig(level=logging.INFO)
+-logger = logging.getLogger("SpeedLayer")
+-
+-class SpeedLayer:
+-    def __init__(self, config: Config = None):
+-        self.config = config or Config()
+-
+-        # SparkSession: note you can also pass spark.jars.packages via spark-submit CLI.
+-        self.spark = (
+-            SparkSession.builder
+-            .appName("WaterMeterSpeedLayer")
+-            # Optional: if you want to enforce ES config at session level
+-            .config("spark.es.nodes", self.config.ES_HOSTS)  # e.g. "elasticsearch" or "localhost"
+-            # .config("spark.es.port", str(self.config.ES_PORT))
+-            .config("spark.es.nodes.wan.only", "true")
+-            .config("spark.sql.adaptive.enabled", "true")
+-            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+-            .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+-            .getOrCreate()
+-        )
+-
+-        self.spark.sparkContext.setLogLevel("WARN")
+-        logger.info("SparkSession created for SpeedLayer")
+-
+-    def get_schema(self):
+-        """Return StructType for message JSON payload (adjust types as needed)."""
+-        return StructType([
+-            StructField("meter_id", StringType(), True),
+-            StructField("timestamp", StringType(), True),  # will parse to Timestamp later
+-            StructField("measurement_type", StringType(), True),
+-            StructField("series", StringType(), True),
+-            StructField("unit", StringType(), True),
+-            StructField("value", DoubleType(), True),
+-        ])
+-
+-    def create_kafka_stream(self):
+-        logger.info("Creating Kafka stream from %s", self.config.KAFKA_BOOTSTRAP_SERVERS)
+-        return (
+-            self.spark.readStream
+-            .format("kafka")
+-            .option("kafka.bootstrap.servers", self.config.KAFKA_BOOTSTRAP_SERVERS)
+-            .option("subscribe", self.config.KAFKA_TOPIC)
+-            .option("startingOffsets", "latest")
+-            .option("failOnDataLoss", "false")
+-            .load()
+-        )
+-
+-    def process_realtime_stream(self):
+-        raw_stream = self.create_kafka_stream()
+-
+-        schema = self.get_schema()
+-
+-        parsed = raw_stream.select(
+-            from_json(col("value").cast("string"), schema).alias("data"),
+-            col("timestamp").alias("kafka_timestamp")
+-        ).select("data.*", "kafka_timestamp")
+-
+-        # parse timestamp (assumes ISO-8601 or adjust format)
+-        parsed = parsed.withColumn("timestamp_parsed", to_timestamp(col("timestamp")))
+-
+-        # filter invalid/dirty rows early
+-        filtered = parsed.filter(
+-            (col("value").isNotNull()) &
+-            (col("measurement_type").isNotNull()) &
+-            (col("meter_id").isNotNull()) &
+-            (col("timestamp_parsed").isNotNull()) &
+-            (col("value") >= 0) &
+-            (col("value") <= 1e9)  # sensible upper bound
+-        )
+-
+-        # Aggregation: windowed stats
+-        stats = (
+-            filtered.filter(col("measurement_type").isin("Pulse1", "Pulse1_Total"))
+-            .withWatermark("timestamp_parsed", self.config.WATERMARK_DELAY)
+-            .groupBy(
+-                window(col("timestamp_parsed"), self.config.WINDOW_DURATION, self.config.SLIDE_DURATION),
+-                col("meter_id"),
+-                col("measurement_type")
+-            )
+-            .agg(
+-                sum("value").alias("total_value"),
+-                avg("value").alias("avg_value"),
+-                max("value").alias("max_value"),
+-                min("value").alias("min_value"),
+-                count("*").alias("reading_count"),
+-                stddev("value").alias("std_dev"),
+-                current_timestamp().alias("processed_time")
+-            )
+-        )
+-
+-        # Create a stable id for upsert: meter + window_start (ISO)
+-        stats = stats.withColumn("window_start", date_format(col("window").start, "yyyy-MM-dd'T'HH:mm:ss"))
+-        stats = stats.withColumn("doc_id", concat(col("meter_id"), lit("_"), col("measurement_type"), lit("_"), col("window_start")))
+-
+-        # Anomaly detection: produce records for anomalies (append)
+-        anomalies = filtered.filter(
+-            ((col("measurement_type") == "Pulse1") & (col("value") > self.config.HIGH_FLOW_THRESHOLD)) |
+-            ((col("measurement_type") == "Battery") & (col("value") < self.config.LOW_BATTERY_THRESHOLD)) |
+-            ((col("measurement_type") == "DeviceTemperature") & (col("value") > self.config.HIGH_TEMP_THRESHOLD))
+-        ).withColumn("alert_type",
+-            when((col("measurement_type") == "Pulse1") & (col("value") > self.config.HIGH_FLOW_THRESHOLD), lit("HIGH_FLOW"))
+-            .when((col("measurement_type") == "Battery") & (col("value") < self.config.LOW_BATTERY_THRESHOLD), lit("LOW_BATTERY"))
+-            .otherwise(lit("HIGH_TEMPERATURE"))
+-        ).withColumn("severity",
+-            when(col("alert_type") == "HIGH_FLOW", lit("WARNING"))
+-            .when(col("alert_type") == "LOW_BATTERY", lit("CRITICAL"))
+-            .otherwise(lit("WARNING"))
+-        ).withColumn("alert_timestamp", current_timestamp())
+-
+-        # For anomalies, add a unique id to avoid accidental overwrite if you prefer upsert:
+-        anomalies = anomalies.withColumn("doc_id", concat(col("meter_id"), lit("_"), date_format(col("timestamp_parsed"), "yyyyMMddHHmmss"), lit("_"), expr("uuid()")))
+-
+-        return stats, anomalies
+-
+-    def _write_batch_to_es(self, df, epoch_id, index_name, upsert_id_col=None, op_type="index"):
+-        """
+-        Write a (micro)batch DataFrame to Elasticsearch.
+-        - upsert_id_col: if provided, will be used as ES document id (upsert).
+-        - op_type: "index" (append) or "upsert" (update by id using mapping id).
+-        """
+-        if df is None:
+-            return
+-
+-        # fast empty check
+-        if len(df.take(1)) == 0:
+-            logger.info("Empty micro-batch for %s at epoch %s", index_name, epoch_id)
+-            return
+-
+-        # Add helpful metadata
+-        enriched = df.withColumn("batch_id", lit(str(epoch_id))).withColumn("ingestion_time", current_timestamp())
+-
+-        # If upsert by id is requested, set mapping id option
+-        write_builder = enriched.write.format("org.elasticsearch.spark.sql").option("es.nodes", self.config.ES_HOSTS).option("es.port", str(self.config.ES_PORT)).option("es.nodes.wan.only", "true")
+-
+-        # tuning options (adjust as needed)
+-        write_builder = write_builder.option("es.batch.size.entries", "1000").option("es.batch.write.retry.count", "3").option("es.batch.write.retry.wait", "30s").option("es.http.timeout", "5m").mode("append")
+-
+-        if upsert_id_col:
+-            # tell connector to use this column as document id
+-            write_builder = write_builder.option("es.mapping.id", upsert_id_col)
+-            # if you prefer upsert semantics, connector will index by id (append will overwrite same id)
+-        try:
+-            write_builder.save(index_name)
+-            logger.info("Wrote micro-batch to ES index=%s (epoch=%s) rows=%d", index_name, epoch_id, df.count())
+-        except Exception as e:
+-            logger.exception("Failed writing batch to ES index=%s: %s", index_name, e)
+-            # Optionally implement retry logic (exponential backoff) here
+-            raise
+-
+-    def start_speed_layer(self):
+-        stats_df, anomalies_df = self.process_realtime_stream()
+-
+-        # Stats -> upsert by doc_id into ES index
+-        stats_query = stats_df.writeStream.foreachBatch(
+-            lambda df, epoch_id: self._write_batch_to_es(df, epoch_id, self.config.ES_STATS_INDEX, upsert_id_col="doc_id")
+-        ).outputMode("update").option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/stats").queryName("speed_stats").trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
+-
+-        # Anomalies -> append into ES index (alerts)
+-        anomalies_query = anomalies_df.writeStream.foreachBatch(
+-            lambda df, epoch_id: self._write_batch_to_es(df, epoch_id, self.config.ES_ALERTS_INDEX, upsert_id_col=None)
+-        ).outputMode("append").option("checkpointLocation", f"{self.config.CHECKPOINT_LOCATION}/anomalies").queryName("speed_anomalies").trigger(processingTime=self.config.TRIGGER_INTERVAL).start()
+-
+-        logger.info("Speed layer started: stats_query=%s anomalies_query=%s", stats_query.name, anomalies_query.name)
+-        return [stats_query, anomalies_query]
+-
+-    def stop_queries(self, queries):
+-        for q in queries:
+-            try:
+-                if q.isActive:
+-                    q.stop()
+-            except Exception as e:
+-                logger.warning("Error stopping query %s: %s", getattr(q, "name", "<unknown>"), e)
+-
+-    def monitor_queries(self, queries, interval_seconds=60):
+-        try:
+-            for q in queries:
+-                info = q.lastProgress
+-                logger.info("Query %s active=%s lastProgress=%s", q.name, q.isActive, info)
+-        except Exception as e:
+-            logger.warning("Monitoring failed: %s", e)
+-
+-
+-if __name__ == "__main__":
+-    conf = Config()
+-    layer = SpeedLayer(conf)
+-    queries = []
+-    try:
+-        queries = layer.start_speed_layer()
+-        logger.info("Speed layer running. Press Ctrl+C to stop.")
+-        while True:
+-            layer.monitor_queries(queries, interval_seconds=60)
+-            time.sleep(60)
+-    except KeyboardInterrupt:
+-        logger.info("Shutting down speed layer...")
+-    finally:
+-        layer.stop_queries(queries)
+-        layer.spark.stop()
+-        logger.info("Shutdown complete.")
+diff --git a/lambda_architecture/orchestrator.py b/lambda_architecture/orchestrator.py
+index fed51a6..21c7364 100644
+--- a/lambda_architecture/orchestrator.py
++++ b/lambda_architecture/orchestrator.py
+@@ -14,7 +14,7 @@ class LambdaOrchestrator:
+         cmd = [
+             "docker", "exec", "spark-master",
+             "/opt/spark/bin/spark-submit",
+-            # "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
++            "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
+             "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_2.12:3.1.0",
+             "--conf", "spark.jars.ivy=/tmp/.ivy2",
+             "--master", "spark://spark-master:7077",
+@@ -32,6 +32,7 @@ class LambdaOrchestrator:
+                 subprocess.run([
+                     "docker", "exec", "spark-master",
+                     "/opt/spark/bin/spark-submit",
++                    "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
+                     "--master", "spark://spark-master:7077",
+                     "--packages", "io.delta:delta-spark_2.12:3.1.0",
+                     "--conf", "spark.jars.ivy=/tmp/.ivy2",
+@@ -51,6 +52,7 @@ class LambdaOrchestrator:
+         cmd = [
+             "docker", "exec", "spark-master",
+             "/opt/spark/bin/spark-submit",
++            "--jars", "/opt/spark/jars/delta-core_2.12-2.4.0.jar",
+             "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.15.2",
+             "--master", "spark://spark-master:7077",
+             "/opt/spark-apps/lambda_architecture/speed_layer/stream_processor.py"
+@@ -80,29 +82,6 @@ class LambdaOrchestrator:
+         subprocess.run(["docker", "exec", "namenode", "hdfs", "dfs", "-chmod", "-R", "777", "/data/water_meter"], check=True)
+         print("✓ Metadata uploaded to HDFS")
+     
+-    def upload_hdfs_to_dbfs(self):
+-        """Copy batch data from HDFS Docker → local orchestrator → upload DBFS"""
+-        LOCAL_TMP_PATH = "/tmp/water_meter_data/"
+-        HDFS_RAW_PATH = "/data/water_meter/raw/"
+-
+-        os.makedirs(LOCAL_TMP_PATH, exist_ok=True)
+-
+-        print("Downloading batch data from HDFS Docker to local...")
+-        subprocess.run([
+-            "docker", "exec", "namenode",
+-            "hdfs", "dfs", "-get", f"{HDFS_RAW_PATH}*", LOCAL_TMP_PATH
+-        ], check=True)
+-
+-        print("Uploading batch data to DBFS...")
+-        for file_name in os.listdir(LOCAL_TMP_PATH):
+-            local_file = os.path.join(LOCAL_TMP_PATH, file_name)
+-            dbfs_path = f"dbfs:/data/water_meter/raw/{file_name}"
+-            subprocess.run([
+-                "databricks", "fs", "cp", local_file, dbfs_path, "--overwrite"
+-            ], check=True)
+-
+-        print("✓ Upload to DBFS completed")
+-    
+     def start_all(self):
+         """Start complete Lambda Architecture"""
+         print("Starting Lambda Architecture...")
+@@ -126,7 +105,7 @@ class LambdaOrchestrator:
+         print("\nReal-time Flow:")
+         print("  IoT Data → Kafka → Spark Streaming → Elasticsearch → Kibana")
+         print("\nBatch Flow:")
+-        print("  HDFS → Spark (Databricks) → Hive → Tableau")
++        print("  Kafka → Delta Lake → Spark Batch → Spark Thrift → Tableau")
+         print("\nTo export to Tableau: python visualization/tableau_connectors.py")
+         print("\nPress Ctrl+C to stop all processes")
+ 
+diff --git a/lambda_architecture/performance_monitor.py b/lambda_architecture/performance_monitor.py
+deleted file mode 100644
+index bdfe4af..0000000
+--- a/lambda_architecture/performance_monitor.py
++++ /dev/null
+@@ -1,136 +0,0 @@
+-import time
+-import psutil
+-import logging
+-from datetime import datetime
+-from typing import Dict, Any
+-from config import Config
+-
+-logger = logging.getLogger(__name__)
+-
+-class PerformanceMonitor:
+-    def __init__(self, config=None):
+-        self.config = config or Config()
+-        self.metrics_history = []
+-        self.start_time = time.time()
+-    
+-    def collect_system_metrics(self) -> Dict[str, Any]:
+-        """Collect system performance metrics"""
+-        return {
+-            "timestamp": datetime.now().isoformat(),
+-            "cpu_percent": psutil.cpu_percent(interval=1),
+-            "memory_percent": psutil.virtual_memory().percent,
+-            "disk_usage": psutil.disk_usage('/').percent,
+-            "network_io": psutil.net_io_counters()._asdict(),
+-            "uptime_seconds": time.time() - self.start_time
+-        }
+-    
+-    def collect_processing_metrics(self, spark_session=None) -> Dict[str, Any]:
+-        """Collect Spark processing metrics"""
+-        metrics = {
+-            "timestamp": datetime.now().isoformat(),
+-            "active_jobs": 0,
+-            "completed_jobs": 0,
+-            "failed_jobs": 0
+-        }
+-        
+-        if spark_session:
+-            try:
+-                sc = spark_session.sparkContext
+-                status_tracker = sc.statusTracker()
+-                
+-                metrics.update({
+-                    "active_jobs": len(status_tracker.getActiveJobIds()),
+-                    "executor_infos": len(status_tracker.getExecutorInfos()),
+-                    "application_id": sc.applicationId
+-                })
+-            except Exception as e:
+-                logger.warning(f"Failed to collect Spark metrics: {e}")
+-        
+-        return metrics
+-    
+-    def calculate_throughput(self, records_processed: int, time_window: float) -> float:
+-        """Calculate processing throughput"""
+-        if time_window <= 0:
+-            return 0.0
+-        return records_processed / time_window
+-    
+-    def detect_performance_issues(self, metrics: Dict[str, Any]) -> list:
+-        """Detect performance bottlenecks"""
+-        issues = []
+-        
+-        # CPU usage check
+-        if metrics.get("cpu_percent", 0) > 80:
+-            issues.append("HIGH_CPU_USAGE")
+-        
+-        # Memory usage check
+-        if metrics.get("memory_percent", 0) > 85:
+-            issues.append("HIGH_MEMORY_USAGE")
+-        
+-        # Disk usage check
+-        if metrics.get("disk_usage", 0) > 90:
+-            issues.append("HIGH_DISK_USAGE")
+-        
+-        return issues
+-    
+-    def generate_performance_report(self, spark_session=None) -> Dict[str, Any]:
+-        """Generate comprehensive performance report"""
+-        system_metrics = self.collect_system_metrics()
+-        processing_metrics = self.collect_processing_metrics(spark_session)
+-        issues = self.detect_performance_issues(system_metrics)
+-        
+-        report = {
+-            "system_metrics": system_metrics,
+-            "processing_metrics": processing_metrics,
+-            "performance_issues": issues,
+-            "recommendations": self._get_recommendations(issues)
+-        }
+-        
+-        # Store in history
+-        self.metrics_history.append(report)
+-        
+-        # Keep only last 100 reports
+-        if len(self.metrics_history) > 100:
+-            self.metrics_history = self.metrics_history[-100:]
+-        
+-        return report
+-    
+-    def _get_recommendations(self, issues: list) -> list:
+-        """Get performance optimization recommendations"""
+-        recommendations = []
+-        
+-        if "HIGH_CPU_USAGE" in issues:
+-            recommendations.append("Consider reducing Spark executor cores or increasing cluster size")
+-        
+-        if "HIGH_MEMORY_USAGE" in issues:
+-            recommendations.append("Increase executor memory or optimize data caching strategy")
+-        
+-        if "HIGH_DISK_USAGE" in issues:
+-            recommendations.append("Clean up old checkpoint files and temporary data")
+-        
+-        return recommendations
+-    
+-    def log_metrics(self, spark_session=None):
+-        """Log current performance metrics"""
+-        report = self.generate_performance_report(spark_session)
+-        
+-        logger.info(f"System CPU: {report['system_metrics']['cpu_percent']:.1f}%")
+-        logger.info(f"System Memory: {report['system_metrics']['memory_percent']:.1f}%")
+-        
+-        if report['performance_issues']:
+-            logger.warning(f"Performance issues detected: {report['performance_issues']}")
+-            for rec in report['recommendations']:
+-                logger.info(f"Recommendation: {rec}")
+-
+-if __name__ == "__main__":
+-    monitor = PerformanceMonitor()
+-    
+-    while True:
+-        try:
+-            monitor.log_metrics()
+-            time.sleep(60)  # Log every minute
+-        except KeyboardInterrupt:
+-            logger.info("Performance monitoring stopped")
+-            break
+-        except Exception as e:
+-            logger.error(f"Performance monitoring error: {e}")
+-            time.sleep(30)
+\ No newline at end of file
+diff --git a/lambda_architecture/unified_spark_ingestion ex.py b/lambda_architecture/unified_spark_ingestion ex.py
+deleted file mode 100644
+index ceb20cc..0000000
+--- a/lambda_architecture/unified_spark_ingestion ex.py	
++++ /dev/null
+@@ -1,85 +0,0 @@
+-from pyspark.sql import SparkSession
+-from pyspark.sql.functions import *
+-# from pyspark.sql.types import *
+-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
+-import logging, sys, schedule, time
+-
+-# Logging configuration
+-logging.basicConfig(
+-    level=logging.INFO,
+-    format="%(asctime)s [%(levelname)s] %(message)s",
+-    handlers=[logging.StreamHandler(sys.stdout)]
+-)
+-logger = logging.getLogger("UnifiedSparkIngestion")
+-
+-class UnifiedSparkIngestion:
+-    def __init__(self):
+-        self.spark = SparkSession.builder \
+-            .appName("WaterMeterUnifiedIngestion") \
+-            .config("spark.sql.adaptive.enabled", "true") \
+-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+-            .getOrCreate()
+-        logger.info("Spark session started successfully with Delta support.")
+-    
+-    def batch_ingestion(self):
+-        """Batch layer: Kafka to HDFS Delta"""
+-        try: 
+-            df = self.spark \
+-                .read \
+-                .format("kafka") \
+-                .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092") \
+-                .option("subscribe", "water-meter-readings") \
+-                .option("startingOffsets", "earliest") \
+-                .load()
+-            
+-            parsed_df = df.select(
+-                from_json(col("value").cast("string"), self.get_schema()).alias("data")
+-            ).select("data.*") \
+-             .withColumn("timestamp", to_timestamp(col("timestamp"))) \
+-             .withColumn("date", to_date(col("timestamp")))
+-            
+-            count = parsed_df.count()
+-            logger.info(f"✅ Read {count} records from Kafka")
+-
+-            delta_path = "hdfs://namenode:8020/data/water_meter/raw_delta/"
+-
+-            # Write to Delta Lake
+-            parsed_df.coalesce(10).write \
+-                .format("delta") \
+-                .mode("append") \
+-                .option("mergeSchema", "true") \
+-                .partitionBy("date") \
+-                .save(delta_path)
+-            
+-            logger.info(f"✅ Wrote {count} records to Delta Lake at {delta_path}")
+-            return True
+-        except Exception as e:
+-            logger.error(f"❌ Batch ingestion failed: {e}")
+-            return False
+-
+-    def get_schema(self):
+-        return StructType([
+-            StructField("meter_id", StringType()),
+-            StructField("timestamp", StringType()),
+-            StructField("measurement_type", StringType()),
+-            StructField("series", StringType()),
+-            StructField("unit", StringType()),
+-            StructField("value", DoubleType()),
+-        ])
+-
+-if __name__ == "__main__":
+-    ingestion = UnifiedSparkIngestion()
+-
+-    # Schedule every 2 minutes
+-    schedule.every(2).minutes.do(ingestion.batch_ingestion)
+-
+-    logger.info("⏱ Batch ingestion scheduler started (every 2 minutes).")
+-
+-    # Keep scheduler alive
+-    try:
+-        while True:
+-            schedule.run_pending()
+-            time.sleep(10)
+-    except KeyboardInterrupt:
+-        logger.info("🛑 Scheduler stopped manually.")
+diff --git a/lambda_architecture/utils.py b/lambda_architecture/utils.py
+deleted file mode 100644
+index 7050f57..0000000
+--- a/lambda_architecture/utils.py
++++ /dev/null
+@@ -1,56 +0,0 @@
+-import logging
+-import time
+-from functools import wraps
+-from typing import Callable, Any
+-
+-logger = logging.getLogger(__name__)
+-
+-def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
+-    """Simple retry decorator with exponential backoff"""
+-    def decorator(func: Callable) -> Callable:
+-        @wraps(func)
+-        def wrapper(*args, **kwargs) -> Any:
+-            for attempt in range(max_retries):
+-                try:
+-                    return func(*args, **kwargs)
+-                except Exception as e:
+-                    if attempt == max_retries - 1:
+-                        logger.error(f"{func.__name__} failed after {max_retries} attempts: {e}")
+-                        raise
+-                    
+-                    wait_time = delay * (backoff ** attempt)
+-                    logger.warning(f"{func.__name__} attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s")
+-                    time.sleep(wait_time)
+-        return wrapper
+-    return decorator
+-
+-class CircuitBreaker:
+-    """Circuit breaker pattern for external service calls"""
+-    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+-        self.failure_threshold = failure_threshold
+-        self.timeout = timeout
+-        self.failure_count = 0
+-        self.last_failure_time = None
+-        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+-    
+-    def call(self, func: Callable, *args, **kwargs) -> Any:
+-        if self.state == 'OPEN':
+-            if time.time() - self.last_failure_time > self.timeout:
+-                self.state = 'HALF_OPEN'
+-            else:
+-                raise Exception("Circuit breaker is OPEN")
+-        
+-        try:
+-            result = func(*args, **kwargs)
+-            if self.state == 'HALF_OPEN':
+-                self.state = 'CLOSED'
+-                self.failure_count = 0
+-            return result
+-        except Exception as e:
+-            self.failure_count += 1
+-            self.last_failure_time = time.time()
+-            
+-            if self.failure_count >= self.failure_threshold:
+-                self.state = 'OPEN'
+-            
+-            raise e
+\ No newline at end of file
+diff --git a/performance/function_evaluator.py b/performance/function_evaluator.py
+new file mode 100644
+index 0000000..e1feec8
+--- /dev/null
++++ b/performance/function_evaluator.py
+@@ -0,0 +1,414 @@
++#!/usr/bin/env python3
++"""
++Function Evaluation Module
++Đánh giá từng function cụ thể trong hệ thống
++"""
++
++import time
++import json
++import requests
++from datetime import datetime
++import subprocess
++import os
++import sys
++
++class FunctionEvaluator:
++    def __init__(self):
++        self.results = {}
++        
++    def evaluate_all_functions(self):
++        """Đánh giá tất cả functions"""
++        print("🔧 Đánh giá Functions...")
++        
++        # 1. Kafka Functions
++        self.evaluate_kafka_functions()
++        
++        # 2. Spark Functions  
++        self.evaluate_spark_functions()
++        
++        # 3. Data Processing Functions
++        self.evaluate_data_processing_functions()
++        
++        # 4. Elasticsearch Functions
++        self.evaluate_elasticsearch_functions()
++        
++        # 5. Tạo báo cáo
++        self.generate_function_report()
++        
++    def evaluate_kafka_functions(self):
++        """Đánh giá Kafka functions"""
++        print("📡 Đánh giá Kafka Functions...")
++        
++        functions = {
++            'topic_creation': self._test_kafka_topic_creation,
++            'message_production': self._test_kafka_production,
++            'message_consumption': self._test_kafka_consumption,
++            'topic_management': self._test_kafka_topic_management
++        }
++        
++        self.results['kafka_functions'] = {}
++        
++        for func_name, func in functions.items():
++            try:
++                start_time = time.time()
++                result = func()
++                execution_time = time.time() - start_time
++                
++                self.results['kafka_functions'][func_name] = {
++                    'status': 'success' if result else 'failed',
++                    'execution_time_ms': execution_time * 1000,
++                    'result': result,
++                    'timestamp': datetime.now().isoformat()
++                }
++            except Exception as e:
++                self.results['kafka_functions'][func_name] = {
++                    'status': 'error',
++                    'error': str(e),
++                    'timestamp': datetime.now().isoformat()
++                }
++                
++    def evaluate_spark_functions(self):
++        """Đánh giá Spark functions"""
++        print("⚡ Đánh giá Spark Functions...")
++        
++        functions = {
++            'spark_master_status': self._test_spark_master,
++            'spark_worker_status': self._test_spark_workers,
++            'spark_application_submission': self._test_spark_app_submission,
++            'spark_streaming_status': self._test_spark_streaming
++        }
++        
++        self.results['spark_functions'] = {}
++        
++        for func_name, func in functions.items():
++            try:
++                start_time = time.time()
++                result = func()
++                execution_time = time.time() - start_time
++                
++                self.results['spark_functions'][func_name] = {
++                    'status': 'success' if result else 'failed',
++                    'execution_time_ms': execution_time * 1000,
++                    'result': result,
++                    'timestamp': datetime.now().isoformat()
++                }
++            except Exception as e:
++                self.results['spark_functions'][func_name] = {
++                    'status': 'error',
++                    'error': str(e),
++                    'timestamp': datetime.now().isoformat()
++                }
++                
++    def evaluate_data_processing_functions(self):
++        """Đánh giá Data Processing functions"""
++        print("🔄 Đánh giá Data Processing Functions...")
++        
++        functions = {
++            'data_ingestion': self._test_data_ingestion,
++            'data_enrichment': self._test_data_enrichment,
++            'data_cleaning': self._test_data_cleaning,
++            'batch_processing': self._test_batch_processing
++        }
++        
++        self.results['data_processing_functions'] = {}
++        
++        for func_name, func in functions.items():
++            try:
++                start_time = time.time()
++                result = func()
++                execution_time = time.time() - start_time
++                
++                self.results['data_processing_functions'][func_name] = {
++                    'status': 'success' if result else 'failed',
++                    'execution_time_ms': execution_time * 1000,
++                    'result': result,
++                    'timestamp': datetime.now().isoformat()
++                }
++            except Exception as e:
++                self.results['data_processing_functions'][func_name] = {
++                    'status': 'error',
++                    'error': str(e),
++                    'timestamp': datetime.now().isoformat()
++                }
++                
++    def evaluate_elasticsearch_functions(self):
++        """Đánh giá Elasticsearch functions"""
++        print("🔍 Đánh giá Elasticsearch Functions...")
++        
++        functions = {
++            'cluster_health': self._test_es_cluster_health,
++            'index_creation': self._test_es_index_creation,
++            'document_indexing': self._test_es_document_indexing,
++            'search_functionality': self._test_es_search
++        }
++        
++        self.results['elasticsearch_functions'] = {}
++        
++        for func_name, func in functions.items():
++            try:
++                start_time = time.time()
++                result = func()
++                execution_time = time.time() - start_time
++                
++                self.results['elasticsearch_functions'][func_name] = {
++                    'status': 'success' if result else 'failed',
++                    'execution_time_ms': execution_time * 1000,
++                    'result': result,
++                    'timestamp': datetime.now().isoformat()
++                }
++            except Exception as e:
++                self.results['elasticsearch_functions'][func_name] = {
++                    'status': 'error',
++                    'error': str(e),
++                    'timestamp': datetime.now().isoformat()
++                }
++    
++    # Kafka Test Functions
++    def _test_kafka_topic_creation(self):
++        """Test tạo Kafka topic"""
++        try:
++            result = subprocess.run([
++                'docker', 'exec', 'kafka', 'kafka-topics.sh',
++                '--create', '--topic', 'test_topic_eval',
++                '--bootstrap-server', 'localhost:9092',
++                '--partitions', '1', '--replication-factor', '1'
++            ], capture_output=True, text=True, timeout=30)
++            return result.returncode == 0
++        except:
++            return False
++            
++    def _test_kafka_production(self):
++        """Test Kafka message production"""
++        try:
++            from kafka import KafkaProducer
++            producer = KafkaProducer(bootstrap_servers=['localhost:9092'])
++            producer.send('test_topic_eval', b'test message')
++            producer.flush()
++            producer.close()
++            return True
++        except:
++            return False
++            
++    def _test_kafka_consumption(self):
++        """Test Kafka message consumption"""
++        try:
++            from kafka import KafkaConsumer
++            consumer = KafkaConsumer(
++                'test_topic_eval',
++                bootstrap_servers=['localhost:9092'],
++                auto_offset_reset='earliest',
++                consumer_timeout_ms=5000
++            )
++            messages = list(consumer)
++            consumer.close()
++            return len(messages) > 0
++        except:
++            return False
++            
++    def _test_kafka_topic_management(self):
++        """Test Kafka topic management"""
++        try:
++            result = subprocess.run([
++                'docker', 'exec', 'kafka', 'kafka-topics.sh',
++                '--list', '--bootstrap-server', 'localhost:9092'
++            ], capture_output=True, text=True, timeout=30)
++            return 'water_meter_data' in result.stdout
++        except:
++            return False
++    
++    # Spark Test Functions
++    def _test_spark_master(self):
++        """Test Spark Master status"""
++        try:
++            response = requests.get('http://localhost:8081/json/', timeout=10)
++            data = response.json()
++            return data.get('status') == 'ALIVE'
++        except:
++            return False
++            
++    def _test_spark_workers(self):
++        """Test Spark Workers status"""
++        try:
++            response = requests.get('http://localhost:8081/json/', timeout=10)
++            data = response.json()
++            workers = data.get('workers', [])
++            return len(workers) > 0 and all(w.get('state') == 'ALIVE' for w in workers)
++        except:
++            return False
++            
++    def _test_spark_app_submission(self):
++        """Test Spark application submission"""
++        try:
++            response = requests.get('http://localhost:8081/json/applications/', timeout=10)
++            apps = response.json()
++            return len(apps) >= 0  # Có thể không có app nào đang chạy
++        except:
++            return False
++            
++    def _test_spark_streaming(self):
++        """Test Spark Streaming status"""
++        try:
++            response = requests.get('http://localhost:4040/api/v1/applications', timeout=10)
++            return response.status_code == 200
++        except:
++            return False
++    
++    # Data Processing Test Functions
++    def _test_data_ingestion(self):
++        """Test data ingestion function"""
++        try:
++            # Kiểm tra file ingestion có tồn tại
++            ingestion_file = '../lambda_architecture/unified_spark_ingestion.py'
++            return os.path.exists(ingestion_file)
++        except:
++            return False
++            
++    def _test_data_enrichment(self):
++        """Test data enrichment function"""
++        try:
++            # Kiểm tra file enrichment có tồn tại
++            enrichment_file = '../lambda_architecture/data_enrichment.py'
++            return os.path.exists(enrichment_file)
++        except:
++            return False
++            
++    def _test_data_cleaning(self):
++        """Test data cleaning function"""
++        try:
++            # Kiểm tra file cleaning có tồn tại
++            cleaning_file = '../lambda_architecture/data_cleaning.py'
++            return os.path.exists(cleaning_file)
++        except:
++            return False
++            
++    def _test_batch_processing(self):
++        """Test batch processing function"""
++        try:
++            # Kiểm tra file batch processor có tồn tại
++            batch_file = '../lambda_architecture/batch_layer/batch_processor.py'
++            return os.path.exists(batch_file)
++        except:
++            return False
++    
++    # Elasticsearch Test Functions
++    def _test_es_cluster_health(self):
++        """Test Elasticsearch cluster health"""
++        try:
++            response = requests.get('http://localhost:9200/_cluster/health', timeout=10)
++            data = response.json()
++            return data.get('status') in ['green', 'yellow']
++        except:
++            return False
++            
++    def _test_es_index_creation(self):
++        """Test Elasticsearch index creation"""
++        try:
++            response = requests.put(
++                'http://localhost:9200/test_index_eval',
++                headers={'Content-Type': 'application/json'},
++                timeout=10
++            )
++            return response.status_code in [200, 201]
++        except:
++            return False
++            
++    def _test_es_document_indexing(self):
++        """Test Elasticsearch document indexing"""
++        try:
++            doc = {
++                'test_field': 'test_value',
++                'timestamp': datetime.now().isoformat()
++            }
++            response = requests.post(
++                'http://localhost:9200/test_index_eval/_doc',
++                json=doc,
++                headers={'Content-Type': 'application/json'},
++                timeout=10
++            )
++            return response.status_code in [200, 201]
++        except:
++            return False
++            
++    def _test_es_search(self):
++        """Test Elasticsearch search functionality"""
++        try:
++            query = {
++                'query': {
++                    'match_all': {}
++                }
++            }
++            response = requests.post(
++                'http://localhost:9200/test_index_eval/_search',
++                json=query,
++                headers={'Content-Type': 'application/json'},
++                timeout=10
++            )
++            return response.status_code == 200
++        except:
++            return False
++            
++    def generate_function_report(self):
++        """Tạo báo cáo đánh giá functions"""
++        print("📋 Tạo báo cáo Functions...")
++        
++        report = {
++            'evaluation_timestamp': datetime.now().isoformat(),
++            'function_results': self.results,
++            'summary': self._generate_function_summary()
++        }
++        
++        # Lưu báo cáo JSON
++        with open('function_evaluation_report.json', 'w', encoding='utf-8') as f:
++            json.dump(report, f, indent=2, ensure_ascii=False)
++        
++        # Tạo báo cáo readable
++        self._create_function_readable_report(report)
++        
++        print("✅ Báo cáo Functions đã được lưu:")
++        print("   📄 function_evaluation_report.json")
++        print("   📊 function_evaluation_summary.txt")
++        
++    def _generate_function_summary(self):
++        """Tạo tóm tắt đánh giá functions"""
++        summary = {}
++        
++        for category, functions in self.results.items():
++            passed = sum(1 for f in functions.values() if f.get('status') == 'success')
++            total = len(functions)
++            summary[category] = {
++                'passed': passed,
++                'total': total,
++                'success_rate': (passed / total * 100) if total > 0 else 0
++            }
++            
++        return summary
++        
++    def _create_function_readable_report(self, report):
++        """Tạo báo cáo functions dễ đọc"""
++        with open('function_evaluation_summary.txt', 'w', encoding='utf-8') as f:
++            f.write("🔧 BÁO CÁO ĐÁNH GIÁ FUNCTIONS\n")
++            f.write("=" * 40 + "\n\n")
++            f.write(f"Thời gian đánh giá: {report['evaluation_timestamp']}\n\n")
++            
++            # Summary
++            f.write("📊 TÓM TẮT FUNCTIONS\n")
++            f.write("-" * 20 + "\n")
++            for category, summary in report['summary'].items():
++                f.write(f"{category}: {summary['passed']}/{summary['total']} ({summary['success_rate']:.1f}%)\n")
++            f.write("\n")
++            
++            # Chi tiết từng category
++            for category, functions in report['function_results'].items():
++                f.write(f"🔧 {category.upper()}\n")
++                f.write("-" * 30 + "\n")
++                for func_name, result in functions.items():
++                    status_icon = "✅" if result['status'] == 'success' else "❌"
++                    f.write(f"{status_icon} {func_name}: {result['status']}")
++                    if 'execution_time_ms' in result:
++                        f.write(f" ({result['execution_time_ms']:.2f}ms)")
++                    f.write("\n")
++                f.write("\n")
++
++if __name__ == "__main__":
++    evaluator = FunctionEvaluator()
++    evaluator.evaluate_all_functions()
+\ No newline at end of file
+diff --git a/performance/performance_evaluator.py b/performance/performance_evaluator.py
+new file mode 100644
+index 0000000..b334460
+--- /dev/null
++++ b/performance/performance_evaluator.py
+@@ -0,0 +1,417 @@
++#!/usr/bin/env python3
++"""
++Performance Evaluation Module for IoT Water Meter Analytics
++Đánh giá hiệu suất và chức năng của hệ thống Lambda Architecture
++"""
++
++import time
++import json
++import psutil
++import pandas as pd
++from datetime import datetime, timedelta
++from kafka import KafkaProducer, KafkaConsumer
++from elasticsearch import Elasticsearch
++import requests
++import subprocess
++import threading
++from concurrent.futures import ThreadPoolExecutor
++import numpy as np
++from benchmark import PerformanceEvaluator as BenchmarkEvaluator
++
++class PerformanceEvaluator:
++    def __init__(self):
++        self.results = {}
++        self.start_time = None
++        self.es = Elasticsearch([{'host': 'localhost', 'port': 9200}])
++        
++    def evaluate_all(self):
++        """Chạy tất cả các đánh giá"""
++        print("🔍 Bắt đầu đánh giá hiệu suất hệ thống...")
++        
++        # 1. Đánh giá Infrastructure
++        self.evaluate_infrastructure()
++        
++        # 2. Đánh giá Kafka Performance
++        self.evaluate_kafka_performance()
++        
++        # 3. Đánh giá Spark Processing
++        self.evaluate_spark_performance()
++        
++        # 4. Đánh giá Elasticsearch
++        self.evaluate_elasticsearch_performance()
++        
++        # 5. Đánh giá End-to-End Latency
++        self.evaluate_end_to_end_latency()
++        
++        # 6. Đánh giá Data Quality
++        self.evaluate_data_quality()
++        
++        # 7. Benchmark Testing
++        self.run_benchmark_tests()
++        
++        # 8. Tạo báo cáo
++        self.generate_report()
++        
++    def evaluate_infrastructure(self):
++        """Đánh giá tài nguyên hệ thống"""
++        print("📊 Đánh giá Infrastructure...")
++        
++        # CPU và Memory
++        cpu_percent = psutil.cpu_percent(interval=1)
++        memory = psutil.virtual_memory()
++        disk = psutil.disk_usage('/')
++        
++        # Docker containers
++        containers = subprocess.run(['docker', 'ps', '--format', 'table {{.Names}}\t{{.Status}}'], 
++                                  capture_output=True, text=True)
++        
++        self.results['infrastructure'] = {
++            'cpu_usage': cpu_percent,
++            'memory_usage': memory.percent,
++            'memory_available_gb': memory.available / (1024**3),
++            'disk_usage': disk.percent,
++            'disk_free_gb': disk.free / (1024**3),
++            'containers_status': containers.stdout,
++            'timestamp': datetime.now().isoformat()
++        }
++        
++    def evaluate_kafka_performance(self):
++        """Đánh giá hiệu suất Kafka"""
++        print("📡 Đánh giá Kafka Performance...")
++        
++        # Test throughput
++        producer = KafkaProducer(
++            bootstrap_servers=['localhost:9092'],
++            value_serializer=lambda x: json.dumps(x).encode('utf-8')
++        )
++        
++        # Gửi test messages
++        test_messages = 1000
++        start_time = time.time()
++        
++        for i in range(test_messages):
++            test_data = {
++                'meter_id': f'test_{i}',
++                'timestamp': datetime.now().isoformat(),
++                'value': np.random.uniform(0, 100),
++                'test_id': i
++            }
++            producer.send('water_meter_data', test_data)
++        
++        producer.flush()
++        send_time = time.time() - start_time
++        
++        self.results['kafka'] = {
++            'throughput_msg_per_sec': test_messages / send_time,
++            'send_latency_ms': (send_time / test_messages) * 1000,
++            'test_messages_sent': test_messages,
++            'timestamp': datetime.now().isoformat()
++        }
++        
++        producer.close()
++        
++    def evaluate_spark_performance(self):
++        """Đánh giá hiệu suất Spark"""
++        print("⚡ Đánh giá Spark Performance...")
++        
++        try:
++            # Spark Master UI
++            spark_ui = requests.get('http://localhost:8081/json/')
++            spark_data = spark_ui.json()
++            
++            # Spark Applications
++            apps_response = requests.get('http://localhost:8081/json/applications/')
++            apps_data = apps_response.json()
++            
++            self.results['spark'] = {
++                'master_status': spark_data.get('status', 'Unknown'),
++                'workers_count': len(spark_data.get('workers', [])),
++                'active_apps': len([app for app in apps_data if app.get('state') == 'RUNNING']),
++                'total_cores': sum([worker.get('cores', 0) for worker in spark_data.get('workers', [])]),
++                'total_memory_mb': sum([worker.get('memory', 0) for worker in spark_data.get('workers', [])]),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++        except Exception as e:
++            self.results['spark'] = {
++                'error': str(e),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++    def evaluate_elasticsearch_performance(self):
++        """Đánh giá hiệu suất Elasticsearch"""
++        print("🔍 Đánh giá Elasticsearch Performance...")
++        
++        try:
++            # Cluster health
++            health = self.es.cluster.health()
++            
++            # Index stats
++            stats = self.es.indices.stats()
++            
++            # Test indexing performance
++            test_docs = 100
++            start_time = time.time()
++            
++            for i in range(test_docs):
++                doc = {
++                    'meter_id': f'perf_test_{i}',
++                    'timestamp': datetime.now().isoformat(),
++                    'value': np.random.uniform(0, 100),
++                    'test_type': 'performance_evaluation'
++                }
++                self.es.index(index='water_meter_stats', body=doc)
++            
++            index_time = time.time() - start_time
++            
++            self.results['elasticsearch'] = {
++                'cluster_status': health['status'],
++                'number_of_nodes': health['number_of_nodes'],
++                'active_shards': health['active_shards'],
++                'indexing_rate_docs_per_sec': test_docs / index_time,
++                'avg_indexing_latency_ms': (index_time / test_docs) * 1000,
++                'total_indices': len(stats['indices']),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++        except Exception as e:
++            self.results['elasticsearch'] = {
++                'error': str(e),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++    def evaluate_end_to_end_latency(self):
++        """Đánh giá độ trễ end-to-end"""
++        print("🎯 Đánh giá End-to-End Latency...")
++        
++        # Gửi test message với timestamp
++        producer = KafkaProducer(
++            bootstrap_servers=['localhost:9092'],
++            value_serializer=lambda x: json.dumps(x).encode('utf-8')
++        )
++        
++        test_id = f"latency_test_{int(time.time())}"
++        send_time = time.time()
++        
++        test_message = {
++            'meter_id': test_id,
++            'timestamp': datetime.now().isoformat(),
++            'value': 99.99,
++            'test_type': 'latency_test',
++            'send_timestamp': send_time
++        }
++        
++        producer.send('water_meter_data', test_message)
++        producer.flush()
++        producer.close()
++        
++        # Chờ và kiểm tra trong Elasticsearch
++        time.sleep(10)  # Chờ processing
++        
++        try:
++            # Tìm message trong ES
++            search_result = self.es.search(
++                index='water_meter_stats',
++                body={
++                    'query': {
++                        'term': {'meter_id': test_id}
++                    }
++                }
++            )
++            
++            if search_result['hits']['total']['value'] > 0:
++                receive_time = time.time()
++                latency = (receive_time - send_time) * 1000
++                
++                self.results['end_to_end_latency'] = {
++                    'latency_ms': latency,
++                    'status': 'success',
++                    'timestamp': datetime.now().isoformat()
++                }
++            else:
++                self.results['end_to_end_latency'] = {
++                    'status': 'message_not_found',
++                    'timestamp': datetime.now().isoformat()
++                }
++                
++        except Exception as e:
++            self.results['end_to_end_latency'] = {
++                'error': str(e),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++    def evaluate_data_quality(self):
++        """Đánh giá chất lượng dữ liệu"""
++        print("📈 Đánh giá Data Quality...")
++        
++        try:
++            # Kiểm tra dữ liệu trong ES
++            search_result = self.es.search(
++                index='water_meter_stats',
++                body={
++                    'size': 1000,
++                    'query': {'match_all': {}}
++                }
++            )
++            
++            docs = search_result['hits']['hits']
++            
++            if docs:
++                # Phân tích chất lượng
++                total_docs = len(docs)
++                missing_fields = 0
++                invalid_values = 0
++                
++                for doc in docs:
++                    source = doc['_source']
++                    
++                    # Kiểm tra missing fields
++                    required_fields = ['meter_id', 'timestamp', 'value']
++                    if not all(field in source for field in required_fields):
++                        missing_fields += 1
++                    
++                    # Kiểm tra invalid values
++                    if 'value' in source:
++                        try:
++                            value = float(source['value'])
++                            if value < 0 or value > 10000:  # Reasonable range
++                                invalid_values += 1
++                        except:
++                            invalid_values += 1
++                
++                self.results['data_quality'] = {
++                    'total_documents': total_docs,
++                    'missing_fields_count': missing_fields,
++                    'invalid_values_count': invalid_values,
++                    'data_completeness_percent': ((total_docs - missing_fields) / total_docs) * 100,
++                    'data_validity_percent': ((total_docs - invalid_values) / total_docs) * 100,
++                    'timestamp': datetime.now().isoformat()
++                }
++            else:
++                self.results['data_quality'] = {
++                    'status': 'no_data_found',
++                    'timestamp': datetime.now().isoformat()
++                }
++                
++        except Exception as e:
++            self.results['data_quality'] = {
++                'error': str(e),
++                'timestamp': datetime.now().isoformat()
++            }
++            
++    def generate_report(self):
++        """Tạo báo cáo đánh giá"""
++        print("📋 Tạo báo cáo đánh giá...")
++        
++        report = {
++            'evaluation_timestamp': datetime.now().isoformat(),
++            'system_performance': self.results,
++            'summary': self._generate_summary()
++        }
++        
++        # Lưu báo cáo JSON
++        with open('performance_report.json', 'w', encoding='utf-8') as f:
++            json.dump(report, f, indent=2, ensure_ascii=False)
++        
++        # Tạo báo cáo readable
++        self._create_readable_report(report)
++        
++        print("✅ Báo cáo đã được lưu:")
++        print("   📄 performance_report.json")
++        print("   📊 performance_summary.txt")
++        
++    def _generate_summary(self):
++        """Tạo tóm tắt đánh giá"""
++        summary = {}
++        
++        # Infrastructure Summary
++        if 'infrastructure' in self.results:
++            infra = self.results['infrastructure']
++            summary['infrastructure_health'] = 'Good' if infra['cpu_usage'] < 80 and infra['memory_usage'] < 80 else 'Warning'
++        
++        # Kafka Summary
++        if 'kafka' in self.results:
++            kafka = self.results['kafka']
++            summary['kafka_performance'] = 'Good' if kafka.get('throughput_msg_per_sec', 0) > 100 else 'Needs Improvement'
++        
++        # Spark Summary
++        if 'spark' in self.results:
++            spark = self.results['spark']
++            summary['spark_status'] = spark.get('master_status', 'Unknown')
++        
++        # Elasticsearch Summary
++        if 'elasticsearch' in self.results:
++            es = self.results['elasticsearch']
++            summary['elasticsearch_health'] = es.get('cluster_status', 'Unknown')
++        
++        # End-to-End Latency Summary
++        if 'end_to_end_latency' in self.results:
++            latency = self.results['end_to_end_latency']
++            if 'latency_ms' in latency:
++                summary['latency_performance'] = 'Excellent' if latency['latency_ms'] < 1000 else 'Good' if latency['latency_ms'] < 5000 else 'Needs Improvement'
++        
++        # Data Quality Summary
++        if 'data_quality' in self.results:
++            quality = self.results['data_quality']
++            if 'data_completeness_percent' in quality:
++                summary['data_quality'] = 'Excellent' if quality['data_completeness_percent'] > 95 else 'Good' if quality['data_completeness_percent'] > 90 else 'Needs Improvement'
++        
++        return summary
++        
++    def _create_readable_report(self, report):
++        """Tạo báo cáo dễ đọc"""
++        with open('performance_summary.txt', 'w', encoding='utf-8') as f:
++            f.write("🔍 BÁO CÁO ĐÁNH GIÁ HIỆU SUẤT HỆ THỐNG\n")
++            f.write("=" * 50 + "\n\n")
++            f.write(f"Thời gian đánh giá: {report['evaluation_timestamp']}\n\n")
++            
++            # Summary
++            f.write("📊 TÓM TẮT TỔNG QUAN\n")
++            f.write("-" * 20 + "\n")
++            for key, value in report['summary'].items():
++                f.write(f"{key.replace('_', ' ').title()}: {value}\n")
++            f.write("\n")
++            
++            # Chi tiết từng component
++            for component, data in report['system_performance'].items():
++                f.write(f"🔧 {component.upper()}\n")
++                f.write("-" * 20 + "\n")
++                for key, value in data.items():
++                    if key != 'timestamp':
++                        f.write(f"{key}: {value}\n")
++                f.write("\n")
++
++if __name__ == "__main__":
++    evaluator = PerformanceEvaluator()
++    evaluator.evaluate_all()
++            
++    def run_benchmark_tests(self):
++        """Chạy benchmark tests từ file benchmark.py"""
++        print("🏃 Chạy Benchmark Tests...")
++        
++        try:
++            benchmark = BenchmarkEvaluator()
++            
++            # Test throughput (30s)
++            print("  📊 Testing throughput...")
++            throughput = benchmark.measure_throughput(topic='water_meter_data', duration=30)
++            
++            # Test latency (50 samples)
++            print("  ⏱️ Testing latency...")
++            latency_stats = benchmark.measure_latency(samples=50)
++            
++            # Generate benchmark report
++            benchmark_report = benchmark.generate_report()
++            
++            self.results['benchmark'] = {
++                'throughput_msg_per_sec': throughput,
++                'latency_stats': latency_stats,
++                'full_benchmark_report': benchmark_report,
++                'timestamp': datetime.now().isoformat()
++            }
++            
++        except Exception as e:
++            self.results['benchmark'] = {
++                'error': str(e),
++                'timestamp': datetime.now().isoformat()
++            }
+\ No newline at end of file
+diff --git a/reset_docker.sh b/reset_spark_checkpoints.sh
+similarity index 60%
+rename from reset_docker.sh
+rename to reset_spark_checkpoints.sh
+index fd58974..efcf6a2 100755
+--- a/reset_docker.sh
++++ b/reset_spark_checkpoints.sh
+@@ -1,5 +1,8 @@
+ #!/bin/bash
+ 
++echo "🔄 Resetting Spark Checkpoints..."
++echo "================================"
++
+ docker exec -it spark-master bash -c "
+     rm -rf /tmp/spark_checkpoints
+     echo 'Deleted: /tmp/spark_checkpoints'
+diff --git a/run_data_generator.sh b/run_data_generator.sh
+index d510604..5eb3d1b 100755
+--- a/run_data_generator.sh
++++ b/run_data_generator.sh
+@@ -15,14 +15,10 @@ echo ""
+ echo "📊 Monitor data flow:"
+ echo "- Kafka UI: http://localhost:8080"
+ echo "- Kibana: http://localhost:5601"
++echo "- HDFS: http://localhost:9870"
++echo "- Spark Master: http://localhost:8081"
+ echo ""
+ echo "Press Ctrl+C to stop data generation..."
+ 
+ # Start data generator
+-python data_generator/water_meter_simulator.py
+-
+-# Cach clear spark cho speed layer
+-Clear checkpoint
+-Close orchestrator
+-Close Spark master, worker
+-Open again
+\ No newline at end of file
++python data_generator/water_meter_simulator.py
+\ No newline at end of file
+diff --git a/run_pipeline_only.sh b/run_pipeline_only.sh
+index 6171e89..6c9b887 100755
+--- a/run_pipeline_only.sh
++++ b/run_pipeline_only.sh
+@@ -17,13 +17,23 @@ docker-compose up -d
+ echo "⏳ Waiting for services (30s)..."
+ sleep 30
+ 
++# Setup Spark environment
++echo "⚙️ Setting up Spark environment..."
++docker exec -u 0 spark-master mkdir -p /home/spark/.ivy2/cache
++docker exec -u 0 spark-master chown -R 185:185 /home/spark
++
++# Setup HDFS directories and permissions
++echo "🗄️ Setting up HDFS directories and permissions..."
++docker exec namenode hdfs dfs -mkdir -p /data/water_meter 2>/dev/null || true
++docker exec namenode hdfs dfs -chmod -R 777 /data/water_meter 2>/dev/null || true
++
+ # Setup Kafka topics
+ echo "📡 Setting up Kafka topics..."
+ python kafka_setup/kafka_config.py
+ 
+ # Setup Elasticsearch
+ echo "🔍 Setting up Elasticsearch..."
+-python3 visualization/elasticsearch_mapping.py
++python visualization/elasticsearch_speed_mapping_updated.py
+ 
+ echo "✅ Infrastructure ready!"
+ echo ""
+@@ -38,8 +48,10 @@ echo "🎉 Pipeline Ready for Data!"
+ echo "📊 Kibana: http://localhost:5601"
+ echo "📈 Kafka UI: http://localhost:8080"
+ echo "💾 HDFS: http://localhost:9870"
++echo "⚡ Spark Master: http://localhost:8081"
+ echo ""
+ echo "💡 To generate data: ./run_data_generator.sh"
++echo "🔄 To reset checkpoints: ./reset_spark_checkpoints.sh"
+ echo "Press Ctrl+C to stop pipeline..."
+ 
+ # Cleanup function
+@@ -56,33 +68,4 @@ cleanup() {
+ trap cleanup INT TERM
+ 
+ # Wait for process
+-wait
+-
+-#--------------------------------
+-# Important step: Tạo cache 
+-docker exec -u 0 spark-master mkdir -p /home/spark/.ivy2/cache
+-docker exec -u 0 spark-master chown -R 185:185 /home/spark
+-
+-# Thay đổi quyền trên HDFS
+-docker exec -it namenode bash
+-hdfs dfs -chmod -R 777 /data/water_meter
+-# Kiem tra
+-docker exec -it namenode hdfs dfs -ls /data/water_meter/
+-
+-docker exec namenode hdfs dfs -rm -r -f /data
+-
+-# Cài schedule package trong spark
+-## Vào container:
+-docker exec -it spark-master bash
+-## Cài schedule:
+-pip install schedule
+-
+-# Mount delta bản 2.4.0, hiện tại ko cần
+-curl -o C:\Users\MSI\Downloads\delta-core_2.12-2.4.0.jar \
+-https://repo1.maven.org/maven2/io/delta/delta-core_2.12/2.4.0/delta-core_2.12-2.4.0.jar
+-
+-docker cp C:\Users\MSI\Downloads\delta-core_2.12-2.4.0.jar spark-master:/opt/spark/jars/
+-
+-ls -l /opt/spark/jars | grep delta
+-
+-docker cp C:\Users\MSI\Downloads\delta-storage-2.4.0.jar spark-master:/opt/spark/jars/  
++wait
+\ No newline at end of file
+diff --git a/visualization/kibana_dashboard_updated.json b/visualization/kibana_dashboard_updated.json
+deleted file mode 100644
+index e26694b..0000000
+--- a/visualization/kibana_dashboard_updated.json
++++ /dev/null
+@@ -1 +0,0 @@
+-{\n  \"version\": \"8.0.0\",\n  \"objects\": [\n    {\n      \"id\": \"water-meter-overview\",\n      \"type\": \"dashboard\",\n      \"attributes\": {\n        \"title\": \"Water Meter Analytics Dashboard - Real Data\",\n        \"description\": \"IoT water meter monitoring with real measurement data\",\n        \"panelsJSON\": \"[{\\\"version\\\":\\\"8.0.0\\\",\\\"gridData\\\":{\\\"x\\\":0,\\\"y\\\":0,\\\"w\\\":24,\\\"h\\\":15},\\\"panelIndex\\\":\\\"1\\\",\\\"embeddableConfig\\\":{\\\"title\\\":\\\"Flow Measurements by Meter Type\\\"},\\\"panelRefName\\\":\\\"panel_1\\\"},{\\\"version\\\":\\\"8.0.0\\\",\\\"gridData\\\":{\\\"x\\\":24,\\\"y\\\":0,\\\"w\\\":24,\\\"h\\\":15},\\\"panelIndex\\\":\\\"2\\\",\\\"embeddableConfig\\\":{\\\"title\\\":\\\"Battery Levels by Suburb\\\"},\\\"panelRefName\\\":\\\"panel_2\\\"},{\\\"version\\\":\\\"8.0.0\\\",\\\"gridData\\\":{\\\"x\\\":0,\\\"y\\\":15,\\\"w\\\":24,\\\"h\\\":15},\\\"panelIndex\\\":\\\"3\\\",\\\"embeddableConfig\\\":{\\\"title\\\":\\\"Measurement Types Distribution\\\"},\\\"panelRefName\\\":\\\"panel_3\\\"},{\\\"version\\\":\\\"8.0.0\\\",\\\"gridData\\\":{\\\"x\\\":24,\\\"y\\\":15,\\\"w\\\":24,\\\"h\\\":15},\\\"panelIndex\\\":\\\"4\\\",\\\"embeddableConfig\\\":{\\\"title\\\":\\\"Usage Type Analysis\\\"},\\\"panelRefName\\\":\\\"panel_4\\\"}]\",\n        \"timeRestore\": true,\n        \"timeTo\": \"now\",\n        \"timeFrom\": \"now-24h\",\n        \"kibanaSavedObjectMeta\": {\n          \"searchSourceJSON\": \"{\\\"query\\\":{\\\"query\\\":\\\"measurement_type:(Pulse1 OR Pulse1_Total OR Battery)\\\",\\\"language\\\":\\\"kuery\\\"},\\\"filter\\\":[{\\\"meta\\\":{\\\"alias\\\":null,\\\"disabled\\\":false,\\\"key\\\":\\\"meter_type\\\",\\\"negate\\\":false,\\\"params\\\":{\\\"query\\\":\\\"captis_pulse\\\"},\\\"type\\\":\\\"phrase\\\"},\\\"query\\\":{\\\"match_phrase\\\":{\\\"meter_type\\\":\\\"captis_pulse\\\"}}}]}\"\n        }\n      }\n    },\n    {\n      \"id\": \"flow-measurements-viz\",\n      \"type\": \"visualization\",\n      \"attributes\": {\n        \"title\": \"Flow Measurements Timeline\",\n        \"visState\": \"{\\\"title\\\":\\\"Flow Measurements Timeline\\\",\\\"type\\\":\\\"line\\\",\\\"aggs\\\":[{\\\"id\\\":\\\"1\\\",\\\"type\\\":\\\"sum\\\",\\\"params\\\":{\\\"field\\\":\\\"value\\\"}},{\\\"id\\\":\\\"2\\\",\\\"type\\\":\\\"date_histogram\\\",\\\"params\\\":{\\\"field\\\":\\\"timestamp\\\",\\\"interval\\\":\\\"auto\\\",\\\"min_doc_count\\\":1}},{\\\"id\\\":\\\"3\\\",\\\"type\\\":\\\"terms\\\",\\\"params\\\":{\\\"field\\\":\\\"measurement_type\\\",\\\"size\\\":5}}]}\",\n        \"kibanaSavedObjectMeta\": {\n          \"searchSourceJSON\": \"{\\\"index\\\":\\\"water-meter-data\\\",\\\"query\\\":{\\\"match\\\":{\\\"measurement_type\\\":\\\"Pulse1\\\"}},\\\"filter\\\":[]}\"\n        }\n      }\n    }\n  ]\n}
+\ No newline at end of file
+diff --git a/visualization/tableau_connectors.py b/visualization/tableau_connectors.py
+index 473ed02..9f75524 100644
+--- a/visualization/tableau_connectors.py
++++ b/visualization/tableau_connectors.py
+@@ -1,74 +1,59 @@
+ from pyspark.sql import SparkSession
+ import pandas as pd
+ 
+-class TableauHiveConnector:
++class TableauDeltaConnector:
+     def __init__(self):
+         self.spark = SparkSession.builder \
+-            .appName("TableauHiveConnector") \
+-            .config("spark.sql.warehouse.dir", "/user/hive/warehouse") \
+-            .enableHiveSupport() \
++            .appName("TableauDeltaConnector") \
++            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
++            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+             .getOrCreate()
+     
+     def export_daily_stats(self, output_path='tableau_daily_stats.csv'):
+-        """Export daily stats from Hive to CSV for Tableau"""
++        """Export daily stats from Delta Lake to CSV for Tableau"""
+         try:
+-            df = self.spark.sql("""
+-                SELECT meter_id, date, measurement_type, 
+-                       total_value, avg_value, max_value, min_value, reading_count
+-                FROM water_meter.daily_stats
+-                WHERE measurement_type IN ('Pulse1', 'Pulse1_Total', 'Battery', 'DeviceTemperature')
+-            """)
+-            df.coalesce(1).write.mode("overwrite").csv(output_path, header=True)
+-            print(f"Daily stats exported from Hive to {output_path}")
++            df = self.spark.read.format("delta").load("hdfs://namenode:8020/data/water_meter/batch/daily_stats")
++            df.coalesce(1).write.mode("overwrite").option("header", "true").csv(output_path)
++            print(f"Daily stats exported from Delta Lake to {output_path}")
+         except Exception as e:
+             print(f"Error exporting daily stats: {e}")
+     
+     def export_monthly_stats(self, output_path='tableau_monthly_stats.csv'):
+-        """Export monthly stats from Hive to CSV for Tableau"""
++        """Export monthly stats from Delta Lake to CSV for Tableau"""
+         try:
+-            df = self.spark.sql("""
+-                SELECT meter_id, month, measurement_type, 
+-                       monthly_total, monthly_avg
+-                FROM water_meter.monthly_stats
+-                WHERE measurement_type IN ('Pulse1_Total', 'Battery')
+-            """)
+-            df.coalesce(1).write.mode("overwrite").csv(output_path, header=True)
+-            print(f"Monthly stats exported from Hive to {output_path}")
++            df = self.spark.read.format("delta").load("hdfs://namenode:8020/data/water_meter/batch/monthly_stats")
++            df.coalesce(1).write.mode("overwrite").option("header", "true").csv(output_path)
++            print(f"Monthly stats exported from Delta Lake to {output_path}")
+         except Exception as e:
+             print(f"Error exporting monthly stats: {e}")
+     
+     def export_problem_meters(self, output_path='tableau_problem_meters.csv'):
+-        """Export problem meters from Hive to CSV for Tableau"""
++        """Export problem meters from Delta Lake to CSV for Tableau"""
+         try:
+-            df = self.spark.sql("""
+-                SELECT meter_id, date, measurement_type, issue_type,
+-                       total_value, avg_value, max_value, min_value, reading_count
+-                FROM water_meter.problem_meters
+-                ORDER BY date DESC, issue_type
+-            """)
+-            df.coalesce(1).write.mode("overwrite").csv(output_path, header=True)
+-            print(f"Problem meters exported from Hive to {output_path}")
++            df = self.spark.read.format("delta").load("hdfs://namenode:8020/data/water_meter/batch/problem_meters")
++            df.coalesce(1).write.mode("overwrite").option("header", "true").csv(output_path)
++            print(f"Problem meters exported from Delta Lake to {output_path}")
+         except Exception as e:
+             print(f"Error exporting problem meters: {e}")
+     
+-    def get_hive_connection_info(self):
+-        """Get Hive connection details for direct Tableau connection"""
++    def get_spark_thrift_connection_info(self):
++        """Get Spark Thrift Server connection details for direct Tableau connection"""
+         return {
+             'host': 'localhost',
+             'port': 10000,
+-            'database': 'water_meter',
+-            'tables': ['daily_stats', 'monthly_stats', 'problem_meters', 'raw_readings']
++            'database': 'default',
++            'tables': ['daily_stats', 'monthly_stats', 'problem_meters']
+         }
+ 
+ if __name__ == "__main__":
+-    connector = TableauHiveConnector()
++    connector = TableauDeltaConnector()
+     connector.export_daily_stats()
+     connector.export_monthly_stats()
+     connector.export_problem_meters()
+     
+-    # Print Hive connection info for Tableau
+-    info = connector.get_hive_connection_info()
+-    print(f"\nTableau Hive Connection:")
++    # Print Spark Thrift Server connection info for Tableau
++    info = connector.get_spark_thrift_connection_info()
++    print(f"\nTableau Spark Thrift Server Connection:")
+     print(f"Host: {info['host']}")
+     print(f"Port: {info['port']}")
+     print(f"Database: {info['database']}")

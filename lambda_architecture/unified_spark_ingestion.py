@@ -37,11 +37,15 @@ class UnifiedSparkIngestionStreaming:
     def start_streaming_ingestion(self):
         """Structured Streaming: Kafka → Delta, trigger 2 phút"""
         try:
-            df = self.spark.readStream.format("kafka") \
-                .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092") \
-                .option("subscribe", "water-meter-readings") \
-                .option("startingOffsets", "latest") \
-                .load()
+            df = (
+                self.spark.readStream
+                    .format("kafka")
+                    .option("kafka.bootstrap.servers", "iot-water-meter-analytics-kafka-1:9092")
+                    .option("subscribe", "water-meter-readings")
+                    .option("startingOffsets", "earliest")
+                    .option("failOnDataLoss", "false")
+                    .load()
+            )
 
             parsed_df = df.select(
                 from_json(col("value").cast("string"), self.get_schema()).alias("data")
