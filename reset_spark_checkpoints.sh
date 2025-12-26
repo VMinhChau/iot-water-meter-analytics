@@ -1,9 +1,8 @@
 #!/bin/bash
 
-echo "🔄 Resetting Spark Checkpoints..."
-echo "================================"
+echo "Resetting Spark Streaming Checkpoints (HDFS)"
+echo "============================================"
 
-docker exec -it spark-master bash -c "
-    rm -rf /tmp/spark_checkpoints
-    echo 'Deleted: /tmp/spark_checkpoints'
-"
+docker exec namenode hdfs dfs -rm -r -f /data/water_meter/checkpoints
+
+echo "Deleted: hdfs:///data/water_meter/checkpoints"

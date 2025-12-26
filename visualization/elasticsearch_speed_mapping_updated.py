@@ -1,1 +1,110 @@
-from elasticsearch import Elasticsearch\nimport json\n\nclass ElasticsearchSpeedSetup:\n    def __init__(self, host='localhost:9200'):\n        self.es = Elasticsearch([host])\n    \n    def create_speed_index_mapping(self):\n        \"\"\"Create index mapping for speed layer data\"\"\"\n        mapping = {\n            \"mappings\": {\n                \"properties\": {\n                    \"meter_id\": {\"type\": \"long\"},\n                    \"window_start\": {\"type\": \"date\"},\n                    \"window_end\": {\"type\": \"date\"},\n                    \"measurement_type\": {\"type\": \"keyword\"},\n                    \"total_value\": {\"type\": \"double\"},\n                    \"avg_value\": {\"type\": \"double\"},\n                    \"reading_count\": {\"type\": \"long\"},\n                    \"suburb\": {\"type\": \"keyword\"},\n                    \"meter_type\": {\"type\": \"keyword\"},\n                    \"usage_type\": {\"type\": \"keyword\"}\n                }\n            }\n        }\n        \n        try:\n            self.es.indices.create(index=\"water-meter-speed\", body=mapping)\n            print(\"Speed layer index created successfully\")\n        except Exception as e:\n            print(f\"Speed index may already exist: {e}\")\n    \n    def create_alerts_index_mapping(self):\n        \"\"\"Create index mapping for alerts\"\"\"\n        mapping = {\n            \"mappings\": {\n                \"properties\": {\n                    \"meter_id\": {\"type\": \"long\"},\n                    \"timestamp\": {\"type\": \"date\"},\n                    \"measurement_type\": {\"type\": \"keyword\"},\n                    \"value\": {\"type\": \"double\"},\n                    \"alert_type\": {\"type\": \"keyword\"},\n                    \"suburb\": {\"type\": \"keyword\"},\n                    \"meter_type\": {\"type\": \"keyword\"},\n                    \"usage_type\": {\"type\": \"keyword\"},\n                    \"severity\": {\"type\": \"keyword\"}\n                }\n            }\n        }\n        \n        try:\n            self.es.indices.create(index=\"water-meter-alerts\", body=mapping)\n            print(\"Alerts index created successfully\")\n        except Exception as e:\n            print(f\"Alerts index may already exist: {e}\")\n    \n    def index_sample_speed_data(self):\n        \"\"\"Index sample speed layer data (enriched)\"\"\"\n        sample_docs = [\n            {\n                \"meter_id\": 83008,\n                \"window_start\": \"2022-07-13T07:30:00.000Z\",\n                \"window_end\": \"2022-07-13T07:35:00.000Z\",\n                \"measurement_type\": \"Pulse1\",\n                \"total_value\": 15.0,\n                \"avg_value\": 3.0,\n                \"reading_count\": 5,\n                \"suburb\": \"BUDERIM\",\n                \"meter_type\": \"captis_pulse\",\n                \"usage_type\": \"Residential\"\n            }\n        ]\n        \n        for doc in sample_docs:\n            self.es.index(index=\"water-meter-speed\", body=doc)\n        \n        print(\"Sample speed data indexed\")\n    \n    def index_sample_alert_data(self):\n        \"\"\"Index sample alert data\"\"\"\n        sample_alerts = [\n            {\n                \"meter_id\": 48281097,\n                \"timestamp\": \"2022-07-13T07:30:01.000Z\",\n                \"measurement_type\": \"Pulse1\",\n                \"value\": 460.0,\n                \"alert_type\": \"HIGH_FLOW\",\n                \"suburb\": \"MAROOCHYDORE\",\n                \"meter_type\": \"captis_pulse\",\n                \"usage_type\": \"Non-Residential\",\n                \"severity\": \"WARNING\"\n            }\n        ]\n        \n        for alert in sample_alerts:\n            self.es.index(index=\"water-meter-alerts\", body=alert)\n        \n        print(\"Sample alert data indexed\")\n\nif __name__ == \"__main__\":\n    setup = ElasticsearchSpeedSetup()\n    setup.create_speed_index_mapping()\n    setup.create_alerts_index_mapping()\n    setup.index_sample_speed_data()\n    setup.index_sample_alert_data()
+from elasticsearch import Elasticsearch
+
+
+class ElasticsearchSpeedSetup:
+    def __init__(self, host: str = "http://localhost:9200") -> None:
+        self.es = Elasticsearch(hosts=[host])
+
+    def create_speed_index_mapping(self) -> None:
+        """Create index mapping for speed layer data."""
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "meter_id": {"type": "long"},
+                    "window_start": {"type": "date"},
+                    "window_end": {"type": "date"},
+                    "measurement_type": {"type": "keyword"},
+                    "total_value": {"type": "double"},
+                    "avg_value": {"type": "double"},
+                    "reading_count": {"type": "long"},
+                    "suburb": {"type": "keyword"},
+                    "meter_type": {"type": "keyword"},
+                    "usage_type": {"type": "keyword"},
+                }
+            }
+        }
+
+        try:
+            self.es.indices.create(index="water-meter-speed", body=mapping)
+            print("Speed layer index created successfully")
+        except Exception as exc:
+            print(f"Speed index may already exist: {exc}")
+
+    def create_alerts_index_mapping(self) -> None:
+        """Create index mapping for alerts."""
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "meter_id": {"type": "long"},
+                    "timestamp": {"type": "date"},
+                    "measurement_type": {"type": "keyword"},
+                    "value": {"type": "double"},
+                    "alert_type": {"type": "keyword"},
+                    "suburb": {"type": "keyword"},
+                    "meter_type": {"type": "keyword"},
+                    "usage_type": {"type": "keyword"},
+                    "severity": {"type": "keyword"},
+                }
+            }
+        }
+
+        try:
+            self.es.indices.create(index="water-meter-alerts", body=mapping)
+            print("Alerts index created successfully")
+        except Exception as exc:
+            print(f"Alerts index may already exist: {exc}")
+
+    def index_sample_speed_data(self) -> None:
+        """Index sample speed layer data."""
+        sample_docs = [
+            {
+                "meter_id": 83008,
+                "window_start": "2022-07-13T07:30:00.000Z",
+                "window_end": "2022-07-13T07:35:00.000Z",
+                "measurement_type": "Pulse1",
+                "total_value": 15.0,
+                "avg_value": 3.0,
+                "reading_count": 5,
+                "suburb": "BUDERIM",
+                "meter_type": "captis_pulse",
+                "usage_type": "Residential",
+            }
+        ]
+
+        for doc in sample_docs:
+            self.es.index(index="water-meter-speed", document=doc)
+
+        print("Sample speed data indexed")
+
+    def index_sample_alert_data(self) -> None:
+        """Index sample alert data."""
+        sample_alerts = [
+            {
+                "meter_id": 48281097,
+                "timestamp": "2022-07-13T07:30:01.000Z",
+                "measurement_type": "Pulse1",
+                "value": 460.0,
+                "alert_type": "HIGH_FLOW",
+                "suburb": "MAROOCHYDORE",
+                "meter_type": "captis_pulse",
+                "usage_type": "Non-Residential",
+                "severity": "WARNING",
+            }
+        ]
+
+        for alert in sample_alerts:
+            self.es.index(index="water-meter-alerts", document=alert)
+
+        print("Sample alert data indexed")
+
+
+def main() -> None:
+    setup = ElasticsearchSpeedSetup()
+    setup.create_speed_index_mapping()
+    setup.create_alerts_index_mapping()
+    setup.index_sample_speed_data()
+    setup.index_sample_alert_data()
+
+
+if __name__ == "__main__":
+    main()
