@@ -109,18 +109,18 @@ class LambdaOrchestrator:
         print("=" * 50)
         
         # Setup metadata first
-        self.setup_metadata()
+        # self.setup_metadata()
         # if not self.setup_metadata():
         #     print("Cannot proceed without metadata. Exiting.")
         #     sys.exit(1)
 
-        self.start_data_ingestion()
+        # self.start_data_ingestion()
         
         # Start Speed Layer (Real-time)
-        # self.start_speed_layer()
+        self.start_speed_layer()
         
         # Start Batch Layer (Scheduled)
-        self.start_batch_layer()
+        # self.start_batch_layer()
         
         print("\nBatch and Speed layers running separately!")
         print("\nReal-time Flow:")
